@@ -485,6 +485,10 @@ class VoterExtractorApp:
 
         self.log(f"\n🎉 All pages complete! Total voters: {len(all_results)}")
         
+        # ✅ FINAL LOGIC: Overwrite Sr.No with sequential count
+        for i, row in enumerate(all_results, 1):
+            row['sr.no'] = str(i)
+        
         # ✅ Save Excel only
         self.save_excel(all_results)
 
@@ -578,6 +582,9 @@ class VoterExtractorApp:
         
         # Reorder to only selected columns
         df = df[final_columns]
+        
+        # ✅ Add "Select" column at the start (for manual checking)
+        df.insert(0, "Select", "")
         
         # Generate output filename
         input_file = self.file_path_var.get()
