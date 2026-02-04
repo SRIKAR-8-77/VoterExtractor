@@ -1,9 +1,24 @@
+# Ignore all PDFs and Excel files EXCEPT sample files
 *.pdf
+!cleaned1.pdf
+!cleaned2.pdf
+
 *.xlsx
+!cleaned1_Voter_List_Final.xlsx
+!cleaned2_Voter_List_Final.xlsx
+
+# Other output files
 *.csv
 *.png
+
+# Python
 __pycache__/
+*.pyc
+
+# Environment
 .venv/
 .env
+
+# Test files
 test_*.py
 pdf.py

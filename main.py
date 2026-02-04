@@ -8,6 +8,7 @@ import pandas as pd
 from pdf2image import convert_from_path
 from PIL import Image
 import re
+import torch
 
 # Surya OCR
 from surya.foundation import FoundationPredictor
@@ -25,14 +26,16 @@ MIN_LINE_LEN = 50
 # ---------------- HELPERS ----------------
 def clean_extracted_text(text):
     """
-    ✅ VERIFIED Kaggle text cleaning implementation
+    ✅ Enhanced Kaggle text cleaning implementation
     Applies all regex fixes from the working Kaggle notebook
     """
     if not text:
         return ""
     
-    # 1. REMOVE HTML TAGS
-    text = re.sub(r"<[^>]+>", "", text)
+    # 1. REMOVE NOISE & TAGS
+    text = re.sub(r"<[^>]+>", " ", text)  # HTML tags
+    text = re.sub(r"\bPhoto\b|\bAvailable\b", " ", text)  # Photo/Available text
+    text = re.sub(r"[·•]", " ", text)  # Bullet points and dots
     
     # 2. FIX SPELLING: Change "लिग :", "लीग :", "लंग :" to "लिंग :"
     text = re.sub(r"(?:लिग|लीग|लंग)\s*:", "लिंग :", text)
@@ -57,77 +60,166 @@ def clean_extracted_text(text):
     # 5. GLOBAL QUESTION MARK FIX (? -> २)
     text = re.sub(r"[\d२-९]*\?+[\d२-९]*", lambda m: m.group(0).replace("?", "२"), text)
     
+    # 6. NORMALIZE WHITESPACE
+    text = re.sub(r"\s+", " ", text)
+    
     return text
 
 
 # ---------------- PARSING (KAGGLE-FAITHFUL) ----------------
 def parse_header(text):
-    """Parse header text into structured data"""
+    """Parse header text into structured data - only extracts fields that exist"""
     data = {}
     
-    # Division -> "निवडणूक विभाग"
-    div_match = re.search(r"विभाग\s*:\s*(.*?)\s*निवार्चन", text)
+    # --- DIVISION (निवडणूक विभाग) ---
+    # Pattern 1: "विभाग : 5" (File 1 format)
+    div_match = re.search(r"निवडणूक\s+विभाग\s*:\s*([^निवार्चन]+?)(?=\s*निवार्चन|$)", text)
+    if not div_match:
+        # Pattern 2: "प्रभाग क्र: 5" (File 2 format)
+        div_match = re.search(r"प्रभाग\s+क्र\s*[:\s]+(\d+)", text)
     data['division'] = div_match.group(1).strip() if div_match else ""
-
-    # Gan -> "निवार्चन गण"
-    gan_match = re.search(r"गण\s*:\s*(.*?)\s*यादी", text)
+    
+    # --- ELECTORAL CONSTITUENCY (निवार्चन गण) ---
+    # ONLY extract if "निवार्चन गण" explicitly exists
+    # Pattern: "निवार्चन गण: 9"
+    gan_match = re.search(r"निवार्चन\s+गण\s*:\s*(\d+)", text)
     data['gan'] = gan_match.group(1).strip() if gan_match else ""
-
-    # Part No -> "यादी भाग क्र."
-    part_match = re.search(r"भाग क्र\.\s*(.*?)\s*पत्ता", text)
+    
+    # --- PART NUMBER (यादी भाग क्र.) ---
+    # Captures entire text from "यादी भाग क्र." until "पत्ता" or end of header
+    # Example: "यादी भाग क्र. १४३ : १ - राहुल नगर स्वातंत्र्त्र सैनिक कॉलोनी परभणी शहर"
+    part_match = re.search(r"(यादी\s+भाग\s+क्र\..*?)(?=\s*पत्ता|$)", text)
     data['part_no'] = part_match.group(1).strip() if part_match else ""
-
-    # Address -> "पत्ता"
-    addr_match = re.search(r"पत्ता\s*:\s*(.*?)\s*मतदान", text)
+    
+    # --- ADDRESS (पत्ता) ---
+    # Only extracts if "पत्ता :" explicitly exists
+    # Pattern: "पत्ता : जि.प.प्रा.शाळा घेवंडा"
+    addr_match = re.search(r"पत्ता\s*:\s*(.+?)(?=\s*मतदान|$)", text)
     data['address'] = addr_match.group(1).strip() if addr_match else ""
-
-    # Polling Station -> "मतदान केंद्र"
-    poll_match = re.search(r"केंद्र\s*:\s*(.*)", text)
+    
+    # --- POLLING STATION (मतदान केंद्र) ---
+    # Pattern: "मतदान केंद्र : 9 Ghevanda"
+    poll_match = re.search(r"मतदान\s+केंद्र\s*:\s*(.+?)(?=\s*$)", text)
     data['polling_station'] = poll_match.group(1).strip() if poll_match else ""
-
+    
     return data
 
 
 def parse_box_text(text, header_data):
-    """Parse box text into structured voter data"""
+    """Parse box text into structured voter data with robust field extraction"""
     row_data = {}
     
-    # Header columns
-    row_data['निवडणूक विभाग'] = header_data.get('division', '')
+    # Define field keywords for boundary detection
+    FIELD_KEYWORDS = [
+        'मतदाराचे पूर्ण', 'घर क्रमांक', 'लिंग', 'वय',
+        'नाव', 'नांव',  # Name keywords that appear after some fields
+        'voter', 'house', 'gender', 'age'
+    ]
+    
+    def extract_until_delimiter(pattern, text_to_search):
+        """
+        Extract text after pattern until we hit:
+        1. Pipe delimiter |
+        2. Next field keyword
+        3. End of line
+        """
+        match = re.search(pattern, text_to_search, re.IGNORECASE)
+        if not match:
+            return ""
+        
+        # Get text after the matched pattern
+        start_pos = match.end()
+        remaining_text = text_to_search[start_pos:]
+        
+        # Find the earliest delimiter
+        delimiters = []
+        
+        # Check for pipe
+        pipe_pos = remaining_text.find('|')
+        if pipe_pos != -1:
+            delimiters.append(pipe_pos)
+        
+        # Check for next field keyword
+        for keyword in FIELD_KEYWORDS:
+            keyword_pos = remaining_text.lower().find(keyword.lower())
+            if keyword_pos != -1 and keyword_pos > 0:  # Ignore if at start
+                delimiters.append(keyword_pos)
+        
+        # Use earliest delimiter, or take all remaining text
+        if delimiters:
+            end_pos = min(delimiters)
+            extracted = remaining_text[:end_pos]
+        else:
+            extracted = remaining_text
+        
+        return extracted.strip()
+    
+    # --- VOTER ID & S-NUMBER EXTRACTION (Robust - handles any position) ---
+    # Try to find voter ID (alphanumeric like WMJ6725378 or NMG6681910)
+    voter_id_match = re.search(r"\b([A-Z]{2,}[A-Z0-9]{5,})\b", text)
+    row_data['voter_id'] = voter_id_match.group(1) if voter_id_match else ""
+    
+    # S-number (pattern like 95/153/1)
+    s_match = re.search(r"(\d+/\d+/\d+)", text)
+    row_data['s'] = s_match.group(1) if s_match else ""
+    
+    # --- SERIAL NUMBER EXTRACTION ---
+    # Try pipe-separated first: | 123 |
+    sr_match = re.search(r"\|\s*(\d+)\s*\|", text)
+    if sr_match:
+        row_data['sr.no'] = sr_match.group(1)
+    else:
+        # Fallback: use last part of s-number (e.g., 95/153/1 -> 1)
+        if row_data['s']:
+            parts = row_data['s'].split('/')
+            if len(parts) == 3:
+                row_data['sr.no'] = parts[2]
+            else:
+                row_data['sr.no'] = ""
+        else:
+            row_data['sr.no'] = ""
+    
+    # --- HEADER COLUMNS (only include fields that exist) ---
     row_data['निवार्चन गण'] = header_data.get('gan', '')
     row_data['यादी भाग क्र.'] = header_data.get('part_no', '')
     row_data['पत्ता'] = header_data.get('address', '')
-    row_data['मतदान केंद्र'] = header_data.get('polling_station', '')
-    row_data['संपूर्ण शीर्षक'] = header_data.get('raw_header', '')  # ✅ Full header text
-
-    # Voter ID (First alphanumeric token)
-    vid_match = re.search(r"^([A-Z0-9]+)", text)
-    row_data['voter_id'] = vid_match.group(1) if vid_match else ""
-
-    # s (Pattern like 95/153/1)
-    s_match = re.search(r"(\d+/\d+/\d+)", text)
-    row_data['s'] = s_match.group(1) if s_match else ""
-
-    # sr.no (Digits between pipes ONLY - strict mode)
-    sr_match = re.search(r"\|\s*(\d+)\s*\|", text)
-    row_data['sr.no'] = sr_match.group(1) if sr_match else ""
-
-    # Name (मतदाराचे पूर्ण)
-    name_match = re.search(r"मतदाराचे पूर्ण:\s*([^|]+?)(?:\s*(?:वडिलांचे|पतीचे|नांव|लिंग)|$)", text)
-    row_data['मतदाराचे पूर्ण'] = name_match.group(1).strip() if name_match else ""
-
-    # Gender (लिंग)
-    gender_match = re.search(r"लिंग\s*:\s*([^\s|]+)", text)
-    row_data['लिंग'] = gender_match.group(1).strip() if gender_match else ""
-
-    # Age (वय)
-    age_match = re.search(r"वय\s*:\s*([\d०-९]+)", text)
-    row_data['वय'] = age_match.group(1).strip() if age_match else ""
-
+    
+    # --- NAME EXTRACTION (Robust) ---
+    row_data['मतदाराचे पूर्ण'] = extract_until_delimiter(
+        r"मतदाराचे\s+पूर्ण[:\s]*",
+        text
+    )
+    
+    # --- HOUSE NUMBER EXTRACTION (Robust) ---
+    row_data['घर क्रमांक'] = extract_until_delimiter(
+        r"घर\s+क्रमां?क\s*[:.\s]*",
+        text
+    )
+    
+    # --- GENDER EXTRACTION (Robust) ---
+    row_data['लिंग'] = extract_until_delimiter(
+        r"लिंग\s*[:.\s]*",
+        text
+    )
+    
+    # --- AGE EXTRACTION (Robust) ---
+    age_text = extract_until_delimiter(
+        r"वय\s*[:.\s]*",
+        text
+    )
+    # Extract only digits (handles both English and Devanagari numerals)
+    age_match = re.search(r"([\d०-९]+)", age_text)
+    row_data['वय'] = age_match.group(1) if age_match else age_text
+    
+    # --- RAW HEADER (Full header text for reference) ---
+    row_data['header'] = header_data.get('raw_header', '')
+    
+    # --- DELETED FLAG ---
+    row_data['is_deleted'] = "**" if "**" in text else ""
+    
     return row_data
 
 
-# ---------------- CORE PROCESSING (KAGGLE-FAITHFUL) ----------------
 def get_boxes_and_header(pdf_path, page_num, img_w, img_h):
     """
     ✅ VERIFIED Kaggle implementation
@@ -226,43 +318,90 @@ class VoterExtractorApp:
         self.file_paths = []  # List of selected files
         self.threads_var = tk.StringVar(value="4")
         
-        # New Skipping Logic
-        self.skip_start_var = tk.StringVar(value="0") # How many pages to skip at start
-        self.skip_end_var = tk.StringVar(value="0")   # How many pages to skip at end
-        self.use_same_settings_var = tk.BooleanVar(value=True) # Apply to all pdfs
+        # Device Selection
+        self.device_var = tk.StringVar(value="auto")
+        self.available_devices = self.detect_devices()
         
-        # ✅ Column selection mapping
-        self.column_map = {
-            "sr.no": "sr.no",
-            "s": "s",
-            "voter_id": "voter_id",
-            "name": "मतदाराचे पूर्ण",
-            "gender": "लिंग",
-            "age": "वय",
-            "division": "निवडणूक विभाग",
-            "gan": "निवार्चन गण",
-            "address": "पत्ता",
-            "polling_station": "मतदान केंद्र",
-            "part_no": "यादी भाग क्र.",
-            "header": "संपूर्ण शीर्षक"
-        }
+
         
-        # ✅ Column selection checkboxes (all enabled by default)
-        self.column_vars = {k: tk.BooleanVar(value=True) for k in self.column_map}
+        # ✅ Fixed 12-column structure (no user selection needed)
+        # Columns: sr.no, s, voter_id, निवार्चन गण, यादी भाग क्र., पत्ता,
+        #          मतदाराचे पूर्ण, घर क्रमांक, लिंग, वय, header, is_deleted
         
         # Build UI first (creates log_area)
         self.build_ui()
         
-        # Load Surya OCR models (needs log_area to exist)
-        self.log("⏳ Loading Surya OCR models...")
-        self.foundation_predictor = FoundationPredictor()
-        self.det_predictor = DetectionPredictor()
-        self.rec_predictor = RecognitionPredictor(
-            foundation_predictor=self.foundation_predictor
-        )
-        self.log("✅ Models loaded successfully!")
+        # Load Surya OCR models with selected device
+        self.load_models()
 
         self.ocr_lock = threading.Lock()
+    
+    # ---------- DEVICE DETECTION ----------
+    def detect_devices(self):
+        """Detect available compute devices (CPU, CUDA, MPS)"""
+        devices = []
+        
+        # Always have CPU
+        devices.append(("cpu", "CPU"))
+        
+        # Check for CUDA (NVIDIA GPU)
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            for i in range(gpu_count):
+                gpu_name = torch.cuda.get_device_name(i)
+                gpu_mem = torch.cuda.get_device_properties(i).total_memory / (1024**3)  # GB
+                devices.append((f"cuda:{i}", f"GPU {i}: {gpu_name} ({gpu_mem:.1f}GB)"))
+        
+        # Check for MPS (Apple Silicon)
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            devices.append(("mps", "Apple Silicon GPU (MPS)"))
+        
+        return devices
+    
+    def load_models(self):
+        """Load Surya OCR models on selected device"""
+        device = self.device_var.get()
+        
+        # Extract device name if it's from combo box (format: "device - description")
+        if " - " in device:
+            device = device.split(" - ")[0]
+        
+        if device == "auto":
+            # Auto-select: prefer CUDA > MPS > CPU
+            if torch.cuda.is_available():
+                device = "cuda:0"
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+        
+        # Safe logging (works even if UI not ready)
+        def safe_log(msg):
+            if hasattr(self, 'log_area'):
+                self.log(msg)
+            else:
+                print(msg)
+        
+        safe_log(f"⏳ Loading Surya OCR models on {device.upper()}...")
+        
+        try:
+            # Load models with explicit device
+            self.foundation_predictor = FoundationPredictor(device=device)
+            self.det_predictor = DetectionPredictor(device=device)
+            # RecognitionPredictor doesn't accept device parameter, uses foundation_predictor's device
+            self.rec_predictor = RecognitionPredictor(
+                foundation_predictor=self.foundation_predictor
+            )
+            safe_log(f"✅ Models loaded successfully on {device.upper()}!")
+        except Exception as e:
+            safe_log(f"❌ Error loading models on {device}: {e}")
+            safe_log("⚠️ Falling back to CPU...")
+            self.foundation_predictor = FoundationPredictor(device="cpu")
+            self.det_predictor = DetectionPredictor(device="cpu")
+            self.rec_predictor = RecognitionPredictor(
+                foundation_predictor=self.foundation_predictor
+            )
+            safe_log("✅ Models loaded on CPU")
 
     # ---------- UI ----------
     def build_ui(self):
@@ -292,56 +431,36 @@ class VoterExtractorApp:
         ttk.Label(frame_settings, text="Threads:", style="Big.TLabel").pack(side="left", padx=20)
         ttk.Spinbox(frame_settings, from_=1, to=16, textvariable=self.threads_var, width=5, font=("Helvetica", 24)).pack(side="left", padx=10)
         
-        # Page Skipping Logic
-        ttk.Label(frame_settings, text="Skip Start Pages:", style="Big.TLabel").pack(side="left", padx=20)
-        ttk.Entry(frame_settings, textvariable=self.skip_start_var, width=5, font=("Helvetica", 24)).pack(side="left", padx=10)
+        # Device Selection
+        ttk.Label(frame_settings, text="Device:", style="Big.TLabel").pack(side="left", padx=20)
+        device_options = [("auto", "Auto (Recommended)")] + self.available_devices
+        device_combo = ttk.Combobox(
+            frame_settings,
+            textvariable=self.device_var,
+            values=[f"{name} - {desc}" for name, desc in device_options],
+            state="readonly",
+            width=30,
+            font=("Helvetica", 18)
+        )
+        device_combo.pack(side="left", padx=10)
+        device_combo.current(0)  # Default to Auto
         
-        ttk.Label(frame_settings, text="Skip End Pages:", style="Big.TLabel").pack(side="left", padx=20)
-        ttk.Entry(frame_settings, textvariable=self.skip_end_var, width=5, font=("Helvetica", 24)).pack(side="left", padx=10)
-        
-        # Apply to all checkbox
-        ttk.Checkbutton(frame_settings, text="Apply to All PDFs", variable=self.use_same_settings_var, style="Big.TCheckbutton").pack(side="left", padx=30)
 
-        # Step 3: Column Selection
-        frame_columns = ttk.LabelFrame(self.root, text="Step 3: Select Columns for Excel", style="Big.TLabelframe")
-        frame_columns.pack(fill="x", padx=20, pady=20)
+
         
-        # Create 3 rows of checkboxes (4 columns each)
-        column_labels = {
-            "sr.no": "Serial No",
-            "s": "S (95/153/1)",
-            "voter_id": "Voter ID",
-            "name": "Name (मतदाराचे पूर्ण)",
-            "gender": "Gender (लिंग)",
-            "age": "Age (वय)",
-            "division": "Division (निवडणूक विभाग)",
-            "gan": "Gan (निवार्चन गण)",
-            "address": "Address (पत्ता)",
-            "polling_station": "Polling Station (मतदान केंद्र)",
-            "part_no": "Part No (यादी भाग क्र.)",
-            "header": "Complete Header (संपूर्ण शीर्षक)"
-        }
+        # Apply to all checkbox (Still useful for future settings?)
+        # Keeping it for now as it doesn't hurt, or we can remove if 'Start/End' was its only use.
+        # Actually, let's keep it minimal as per user request for "same as code".
+        # But wait, Apply to All was for SKIP settings. If SKIP is gone, this is useless.
+        # Removing Apply to All as well.
+
+        # Step 3: Output Info
+        frame_output = ttk.LabelFrame(self.root, text="Step 3: Output Format", style="Big.TLabelframe")
+        frame_output.pack(fill="x", padx=20, pady=20)
         
-        # Row 1
-        row1_frame = ttk.Frame(frame_columns)
-        row1_frame.pack(fill="x", padx=10, pady=5)
-        for key in ["sr.no", "s", "voter_id", "name"]:
-            ttk.Checkbutton(row1_frame, text=column_labels[key], 
-                          variable=self.column_vars[key], style="Big.TCheckbutton").pack(side="left", padx=20)
-        
-        # Row 2
-        row2_frame = ttk.Frame(frame_columns)
-        row2_frame.pack(fill="x", padx=10, pady=5)
-        for key in ["gender", "age", "division", "gan"]:
-            ttk.Checkbutton(row2_frame, text=column_labels[key], 
-                          variable=self.column_vars[key], style="Big.TCheckbutton").pack(side="left", padx=20)
-        
-        # Row 3
-        row3_frame = ttk.Frame(frame_columns)
-        row3_frame.pack(fill="x", padx=10, pady=5)
-        for key in ["address", "polling_station", "part_no", "header"]:
-            ttk.Checkbutton(row3_frame, text=column_labels[key], 
-                          variable=self.column_vars[key], style="Big.TCheckbutton").pack(side="left", padx=20)
+        ttk.Label(frame_output, text="✅ Excel files will be saved with 12 columns:", style="Big.TLabel").pack(padx=20, pady=10)
+        ttk.Label(frame_output, text="sr.no, s, voter_id, निवार्चन गण, यादी भाग क्र., पत्ता, मतदाराचे पूर्ण, घर क्रमांक, लिंग, वय, header, is_deleted", 
+                 font=("Helvetica", 14)).pack(padx=20, pady=5)
 
         # Step 4: Start Button (Moved down)
         ttk.Button(
@@ -392,46 +511,68 @@ class VoterExtractorApp:
             
             # Reset results for this file (Sr.No starts at 1)
             all_results = []
-            
             with pdfplumber.open(pdf_path) as p:
                 total_pages = len(p.pages)
             
-            # Calculate Range based on Skip Logic
-            try:
-                skip_start = int(self.skip_start_var.get())
-                skip_end = int(self.skip_end_var.get())
-                
-                start_page = skip_start
-                end_page = total_pages - skip_end - 1 # 0-indexed exclusive
-                
-                if start_page < 0: start_page = 0
-                if end_page >= total_pages: end_page = total_pages - 1
-                if start_page > end_page:
-                    self.log(f"⚠️ Skipping file {pdf_path.split('/')[-1]}: Invalid page range (Start: {start_page}, End: {end_page})")
-                    continue
-                    
-            except ValueError:
-                self.log("❌ Error reading skip values. Defaulting to process ALL pages.")
-                start_page = 0
-                end_page = total_pages - 1
-
-            self.log(f"📄 Processing pages {start_page + 1} to {end_page + 1} (Total: {total_pages})")
+            self.log(f"ℹ️ Total Pages: {total_pages}. Scanning for voter data...")
             
+            processing_started = False
             max_workers = int(self.threads_var.get())
 
-            # Process pages sequentially
-            for page_num in range(start_page, end_page + 1):
-                self.log(f"   Now Processing Page {page_num + 1}...")
+            # Single Pass Loop
+            for page_num in range(total_pages):
+                self.log(f"   -> Checking Page {page_num + 1}...")
                 
-                # Step 1: Convert page to image
-                img = convert_from_path(
-                    pdf_path, dpi=DPI, first_page=page_num + 1, last_page=page_num + 1
-                )[0]
+                # 1. Convert Image (High Res)
+                try:
+                    img = convert_from_path(pdf_path, dpi=DPI, first_page=page_num + 1, last_page=page_num + 1)[0]
+                except Exception as e:
+                    self.log(f"      ⚠️ Error converting page: {e}")
+                    continue
                 
-                # Step 2: Detect boxes
+                # 2. Detect Boxes
                 boxes, header_rect = get_boxes_and_header(pdf_path, page_num, img.width, img.height)
                 
+                # 3. Validate Page
+                is_valid_page = False
+                if boxes:
+                    try:
+                        b = boxes[0]
+                        crop = img.crop((b[0], b[1], b[0] + b[2], b[1] + b[3]))
+                        with self.ocr_lock:
+                            preds = self.rec_predictor([crop], det_predictor=self.det_predictor)
+                        txt_chk = " ".join([l.text for l in preds[0].text_lines])
+                        if re.search(r"[A-Z]{2,}\d+|[A-Z]+\d{3,}|[A-Z]+/[0-9]+/", txt_chk):
+                            is_valid_page = True
+                    except:
+                        is_valid_page = False
+
+                # 4. On-the-Go Logic
+                if not processing_started:
+                    if not is_valid_page:
+                        self.log("      ⚠️ Intro/Non-Voter Page. Skipping.")
+                        continue
+                    else:
+                        self.log("      ✅ START FOUND! Valid Voter ID Detected.")
+                        processing_started = True
+                else:
+                    if not is_valid_page:
+                        self.log("      🛑 END DETECTED. No valid boxes found. Stopping file.")
+                        break
+
+                # =========================================================
+                # 5. PROCESS PAGE
+                # =========================================================
+                # =========================================================
+                # 5. PROCESS PAGE
+                # =========================================================
+                self.log(f"   Processing Page {page_num + 1}...")
+                
+                # Note: 'boxes' and 'header_rect' are already computed in step 2
+                
                 if not boxes:
+                    self.log(f"   ⚠️ Page {page_num + 1}: No boxes detected")
+                    continue
                     self.log(f"   ⚠️ Page {page_num + 1}: No boxes detected")
                     continue
                 
@@ -481,11 +622,14 @@ class VoterExtractorApp:
             for i, row in enumerate(all_results, 1):
                 row['sr.no'] = str(i)
             
-            # ✅ Save Excel for THIS file
-            self.save_excel(all_results, pdf_path)
-
+            # ✅ Save Excel with specific filename
+            self.save_excel(all_results, source_pdf_path=pdf_path)
+        
         self.log(f"\n🎉 BATCH COMPLETED! All PDF files processed.")
         messagebox.showinfo("Batch Complete", "All files have been processed successfully!")
+
+
+
     def process_single_box(self, crop, header_data, page_num, box_num):
         """
         Process a single box with OCR
@@ -500,8 +644,8 @@ class VoterExtractorApp:
             with self.ocr_lock:
                 preds = self.rec_predictor([crop], det_predictor=self.det_predictor)
             
-            # Extract text
-            raw_txt = " ".join([l.text for l in preds[0].text_lines])
+            # Extract text - join with | to preserve field separators from PDF
+            raw_txt = " | ".join([l.text for l in preds[0].text_lines])
             
             # ✅ Apply Kaggle-faithful text cleaning
             cleaned_txt = clean_extracted_text(raw_txt)
@@ -509,100 +653,123 @@ class VoterExtractorApp:
             # ✅ Parse into structured data (Kaggle-faithful)
             row = parse_box_text(cleaned_txt, header_data)
             
+            # Add box index for sorting
+            row['box_idx'] = box_num
+            
             self.log(f"   ✅ Thread {thread_id}: Completed box {box_num + 1}")
             return row
         except Exception as e:
             self.log(f"❌ Error processing box {box_num} on page {page_num + 1}: {e}")
             return None
 
+    def interpolate_serial_numbers(self, results):
+        """Fill in missing serial numbers by interpolating between known values"""
+        if not results:
+            return
+        
+        # Find indices with valid serial numbers
+        valid_indices = []
+        for i, row in enumerate(results):
+            sr = row.get('sr.no', '')
+            if sr and sr.isdigit():
+                valid_indices.append((i, int(sr)))
+        
+        if len(valid_indices) < 2:
+            return  # Need at least 2 points to interpolate
+        
+        # Interpolate between each pair of valid indices
+        for j in range(len(valid_indices) - 1):
+            start_idx, start_val = valid_indices[j]
+            end_idx, end_val = valid_indices[j + 1]
+            
+            # Calculate step size
+            gap = end_idx - start_idx
+            if gap <= 1:
+                continue  # No gap to fill
+            
+            value_diff = end_val - start_val
+            step = value_diff / gap
+            
+            # Fill in missing values
+            for k in range(1, gap):
+                interpolated_val = int(start_val + (step * k))
+                results[start_idx + k]['sr.no'] = str(interpolated_val)
+
 
     # ---------- EXCEL ----------
-    def save_excel(self, data):
-        """Save extracted data to Excel with Kaggle-faithful column structure"""
+    # ---------- EXCEL ----------
+    def save_excel(self, data, source_pdf_path=None):
+        """Save extracted data to Excel with 12-column structure (Excel only)"""
         if not data:
             self.log("⚠️  No data to save")
             return
 
         self.log("📊 Formatting Excel...")
-        df = pd.DataFrame(data)
         
-        # ✅ Build column list based on user selection
-        all_columns = [
-            "sr.no",
-            "s",
-            "voter_id",
-            "मतदाराचे पूर्ण",
-            "लिंग",
-            "वय",
-            "निवडणूक विभाग",
-            "निवार्चन गण",
-            "पत्ता",
-            "मतदान केंद्र",
-            "यादी भाग क्र.",
-            "संपूर्ण शीर्षक"
+        # ✅ EXACT 12 COLUMNS (Final Structure)
+        final_columns = [
+            'sr.no',
+            's',
+            'voter_id',
+            'निवार्चन गण',
+            'यादी भाग क्र.',
+            'पत्ता',
+            'मतदाराचे पूर्ण',
+            'घर क्रमांक',
+            'लिंग',
+            'वय',
+            'header',
+            'is_deleted'
         ]
         
-        # Map internal column names to Marathi names
-        column_name_map = {
-            "sr.no": "sr.no",
-            "s": "s",
-            "voter_id": "voter_id",
-            "name": "मतदाराचे पूर्ण",
-            "gender": "लिंग",
-            "age": "वय",
-            "division": "निवडणूक विभाग",
-            "gan": "निवार्चन गण",
-            "address": "पत्ता",
-            "polling_station": "मतदान केंद्र",
-            "part_no": "यादी भाग क्र.",
-            "header": "संपूर्ण शीर्षक"
-        }
-        
-        # ✅ Get only selected columns
-        final_columns = []
-        for key, marathi_name in column_name_map.items():
-            if self.column_vars[key].get():  # Check if checkbox is selected
-                final_columns.append(marathi_name)
-        
-        if not final_columns:
-            self.log("⚠️  No columns selected! Please select at least one column.")
-            messagebox.showwarning("Warning", "Please select at least one column to export.")
-            return
-        
-        # Ensure all columns exist in dataframe
-        for col in final_columns:
-            if col not in df.columns:
-                df[col] = ""
-        
-        # Reorder to only selected columns
-        df = df[final_columns]
-        
-        # ✅ Add "Select" column at the start (for manual checking)
-        df.insert(0, "Select", "")
+        # Ensure all columns exist in data
+        for row in data:
+            for col in final_columns:
+                if col not in row:
+                    row[col] = ""
         
         # Generate output filename
-        input_file = self.file_path_var.get()
-        if input_file:
-            output_file = input_file.replace(".pdf", "_Voter_List_Final.xlsx")
+        if source_pdf_path:
+            output_file = source_pdf_path.replace(".pdf", "_Voter_List_Final.xlsx")
         else:
             output_file = "Voter_List_Final.xlsx"
         
-        # Save with formatting
-        with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="Voters")
+        # Save using manual openpyxl (avoids sheet visibility error)
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment
+            
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Voters"
+            
+            # Write header row (bold)
+            for col_idx, col_name in enumerate(final_columns, 1):
+                cell = ws.cell(row=1, column=col_idx, value=col_name)
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal='center')
+            
+            # Write data rows
+            for row_idx, row_data in enumerate(data, 2):
+                for col_idx, col_name in enumerate(final_columns, 1):
+                    ws.cell(row=row_idx, column=col_idx, value=row_data.get(col_name, ''))
             
             # Auto-adjust column widths
-            worksheet = writer.sheets["Voters"]
-            for i, col in enumerate(final_columns):
-                max_len = max(
-                    df[col].astype(str).apply(len).max(),
-                    len(col)
-                ) + 2
-                worksheet.set_column(i, i, min(max_len, 50))
-        
-        self.log(f"✅ Excel saved: {output_file}")
-        self.log(f"📊 Total voters extracted: {len(df)}")
-        messagebox.showinfo("Success", f"✅ Saved {len(df)} voters to:\n{output_file}")
+            for col_idx, col_name in enumerate(final_columns, 1):
+                max_len = len(col_name)
+                for row_data in data:
+                    val_len = len(str(row_data.get(col_name, '')))
+                    if val_len > max_len:
+                        max_len = val_len
+                ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 50)
+            
+            wb.save(output_file)
+            self.log(f"✅ Excel saved: {output_file}")
+            self.log(f"📊 Total voters extracted: {len(data)}")
+            messagebox.showinfo("Success", f"✅ Saved {len(data)} voters to:\n{output_file}")
+        except Exception as e:
+            self.log(f"❌ Excel export failed: {e}")
+            messagebox.showerror("Error", f"Failed to save Excel file:\n{e}")
 
 
 # ---------------- RUN ----------------
