@@ -1,0 +1,9 @@
+*.pdf
+*.xlsx
+*.csv
+*.png
+__pycache__/
+.venv/
+.env
+test_*.py
+pdf.py
