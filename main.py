@@ -210,7 +210,7 @@ def get_boxes_and_header(pdf_path, page_num, img_w, img_h):
 class VoterExtractorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Voter PDF OCR Extractor")
+        self.root.title("Voter PDF OCR Extractor (Batch Mode)")
         # ✅ Increased window size for 3x bigger UI
         self.root.geometry("2000x1600")
 
@@ -218,14 +218,18 @@ class VoterExtractorApp:
         style = ttk.Style()
         style.configure("Big.TLabel", font=("Helvetica", 20))
         style.configure("Big.TButton", font=("Helvetica", 24))
-        style.configure("Big.TEntry", font=("Helvetica", 20))
+        style.configure("Big.TEntry", font=("Helvetica", 24))
         style.configure("Big.TCheckbutton", font=("Helvetica", 18))
         style.configure("Big.TLabelframe.Label", font=("Helvetica", 24, "bold"))
 
-        self.file_path_var = tk.StringVar()
+        # Batch Processing Variables
+        self.file_paths = []  # List of selected files
         self.threads_var = tk.StringVar(value="4")
-        self.start_page_var = tk.StringVar(value="1")
-        self.end_page_var = tk.StringVar(value="")
+        
+        # New Skipping Logic
+        self.skip_start_var = tk.StringVar(value="0") # How many pages to skip at start
+        self.skip_end_var = tk.StringVar(value="0")   # How many pages to skip at end
+        self.use_same_settings_var = tk.BooleanVar(value=True) # Apply to all pdfs
         
         # ✅ Column selection mapping
         self.column_map = {
@@ -262,44 +266,41 @@ class VoterExtractorApp:
 
     # ---------- UI ----------
     def build_ui(self):
-        # Step 1: PDF Selection
-        frame_top = ttk.LabelFrame(self.root, text="Step 1: Select PDF", style="Big.TLabelframe")
+        # Step 1: PDF Selection (List Mode)
+        frame_top = ttk.LabelFrame(self.root, text="Step 1: Select PDFs (Batch Mode)", style="Big.TLabelframe")
         frame_top.pack(fill="x", padx=20, pady=20)
 
-        ttk.Entry(frame_top, textvariable=self.file_path_var, width=60, font=("Helvetica", 20)).pack(
-            side="left", padx=10, pady=10
-        )
-        ttk.Button(frame_top, text="Browse", command=self.browse, style="Big.TButton").pack(
-            side="left", padx=10
-        )
+        # File List Button
+        btn_frame = ttk.Frame(frame_top)
+        btn_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Button(btn_frame, text="📂 Add PDF Files", command=self.add_files, style="Big.TButton").pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="🗑️ Clear List", command=self.clear_files, style="Big.TButton").pack(side="left", padx=10)
+        
+        # Listbox to show selected files
+        self.file_listbox = tk.Listbox(frame_top, height=5, font=("Helvetica", 16))
+        self.file_listbox.pack(fill="x", padx=10, pady=10)
 
         # Step 2: Settings
         frame_settings = ttk.LabelFrame(self.root, text="Step 2: Settings", style="Big.TLabelframe")
         frame_settings.pack(fill="x", padx=20, pady=20)
         
         # DPI info
-        ttk.Label(frame_settings, text=f"DPI: {DPI}", style="Big.TLabel").pack(
-            side="left", padx=20, pady=10
-        )
+        ttk.Label(frame_settings, text=f"DPI: {DPI}", style="Big.TLabel").pack(side="left", padx=20, pady=10)
         
         # Threads
         ttk.Label(frame_settings, text="Threads:", style="Big.TLabel").pack(side="left", padx=20)
-        ttk.Spinbox(frame_settings, from_=1, to=16, textvariable=self.threads_var, width=5, font=("Helvetica", 20)).pack(
-            side="left", padx=10
-        )
+        ttk.Spinbox(frame_settings, from_=1, to=16, textvariable=self.threads_var, width=5, font=("Helvetica", 24)).pack(side="left", padx=10)
         
-        # Start Page
-        ttk.Label(frame_settings, text="Start Page:", style="Big.TLabel").pack(side="left", padx=20)
-        ttk.Entry(frame_settings, textvariable=self.start_page_var, width=5, font=("Helvetica", 20)).pack(
-            side="left", padx=10
-        )
+        # Page Skipping Logic
+        ttk.Label(frame_settings, text="Skip Start Pages:", style="Big.TLabel").pack(side="left", padx=20)
+        ttk.Entry(frame_settings, textvariable=self.skip_start_var, width=5, font=("Helvetica", 24)).pack(side="left", padx=10)
         
-        # End Page
-        ttk.Label(frame_settings, text="End Page:", style="Big.TLabel").pack(side="left", padx=20)
-        ttk.Entry(frame_settings, textvariable=self.end_page_var, width=5, font=("Helvetica", 20)).pack(
-            side="left", padx=10
-        )
-        ttk.Label(frame_settings, text="(leave empty for all)", style="Big.TLabel").pack(side="left", padx=10)
+        ttk.Label(frame_settings, text="Skip End Pages:", style="Big.TLabel").pack(side="left", padx=20)
+        ttk.Entry(frame_settings, textvariable=self.skip_end_var, width=5, font=("Helvetica", 24)).pack(side="left", padx=10)
+        
+        # Apply to all checkbox
+        ttk.Checkbutton(frame_settings, text="Apply to All PDFs", variable=self.use_same_settings_var, style="Big.TCheckbutton").pack(side="left", padx=30)
 
         # Step 3: Column Selection
         frame_columns = ttk.LabelFrame(self.root, text="Step 3: Select Columns for Excel", style="Big.TLabelframe")
@@ -360,138 +361,131 @@ class VoterExtractorApp:
         self.root.update_idletasks()
 
     # ---------- FILE ----------
-    def browse(self):
-        f = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
-        if f:
-            self.file_path_var.set(f)
+    def add_files(self):
+        files = filedialog.askopenfilenames(filetypes=[("PDF Files", "*.pdf")])
+        for f in files:
+            if f not in self.file_paths:
+                self.file_paths.append(f)
+                self.file_listbox.insert(tk.END, f) # Simply show full path for clarity
+    
+    def clear_files(self):
+        self.file_paths = []
+        self.file_listbox.delete(0, tk.END)
 
     # ---------- PROCESS ----------
     def start_processing(self):
-        if not self.file_path_var.get():
-            messagebox.showerror("Error", "Select a PDF first")
+        if not self.file_paths:
+            messagebox.showerror("Error", "Select at least one PDF first")
             return
 
-        threading.Thread(target=self.process_pdf, daemon=True).start()
+        threading.Thread(target=self.process_batch, daemon=True).start()
 
-    def process_pdf(self):
+    def process_batch(self):
         """
-        NEW STRATEGY: Box-level parallelism
-        - Process pages sequentially for better progress tracking
-        - Detect all boxes on current page
-        - Distribute box OCR across threads
-        - Move to next page after all boxes complete
+        NEW STRATEGY: Batch Processing
+        - Iterate over all selected PDFs
         """
-        pdf = self.file_path_var.get()
-        self.log("Opening PDF...")
-
-        with pdfplumber.open(pdf) as p:
-            total_pages = len(p.pages)
-
-        # Get page range from UI
-        try:
-            start_page = int(self.start_page_var.get()) - 1  # Convert to 0-indexed
-            if start_page < 0:
-                start_page = 0
-        except:
-            start_page = 0
+        total_files = len(self.file_paths)
         
-        try:
-            end_page_str = self.end_page_var.get().strip()
-            if end_page_str:
-                end_page = int(end_page_str) - 1  # Convert to 0-indexed
-                if end_page >= total_pages:
-                    end_page = total_pages - 1
-            else:
-                end_page = total_pages - 1
-        except:
-            end_page = total_pages - 1
-        
-        self.log(f"Total pages in PDF: {total_pages}")
-        self.log(f"Processing pages {start_page + 1} to {end_page + 1}")
-        
-        # Get thread count from settings
-        max_workers = int(self.threads_var.get())
-        self.log(f"Using {max_workers} threads for box OCR")
-
-        all_results = []
-
-        # Process pages sequentially
-        for page_num in range(start_page, end_page + 1):
-            self.log(f"📄 Page {page_num + 1}/{total_pages}: Detecting boxes...")
+        for file_idx, pdf_path in enumerate(self.file_paths):
+            self.log(f"\n🚀 Processing File {file_idx + 1}/{total_files}: {pdf_path.split('/')[-1]}")
             
-            # Step 1: Convert page to image
-            img = convert_from_path(
-                pdf, dpi=DPI, first_page=page_num + 1, last_page=page_num + 1
-            )[0]
+            # Reset results for this file (Sr.No starts at 1)
+            all_results = []
             
-            # Step 2: Detect boxes
-            boxes, header_rect = get_boxes_and_header(pdf, page_num, img.width, img.height)
+            with pdfplumber.open(pdf_path) as p:
+                total_pages = len(p.pages)
             
-            if not boxes:
-                self.log(f"⚠️  Page {page_num + 1}: No boxes detected, skipping")
-                continue
-            
-            self.log(f"✓ Page {page_num + 1}: {len(boxes)} boxes detected")
-            
-            # Step 3: Extract header (single-threaded, fast)
-            header_data = {}
-            if header_rect:
-                hc = img.crop(header_rect)
-                h_preds = self.rec_predictor([hc], det_predictor=self.det_predictor)
-                header_text = " ".join([l.text for l in h_preds[0].text_lines])
-                header_text = clean_extracted_text(header_text)
+            # Calculate Range based on Skip Logic
+            try:
+                skip_start = int(self.skip_start_var.get())
+                skip_end = int(self.skip_end_var.get())
                 
-                # ✅ Store raw header text
-                header_data['raw_header'] = header_text
+                start_page = skip_start
+                end_page = total_pages - skip_end - 1 # 0-indexed exclusive
                 
-                # ✅ Parse header into structured data
-                parsed_header = parse_header(header_text)
-                header_data.update(parsed_header)
-            
-            # Step 4: Prepare box crops
-            box_crops = []
-            for b in boxes:
-                c = img.crop((b[0], b[1], b[0] + b[2], b[1] + b[3]))
-                if np.mean(np.array(c.convert("L"))) < 250:
-                    box_crops.append(c)
-            
-            if not box_crops:
-                self.log(f"⚠️  Page {page_num + 1}: No valid boxes, skipping")
-                continue
-            
-            self.log(f"🔄 Page {page_num + 1}: Processing {len(box_crops)} boxes across {max_workers} threads...")
-            
-            # Step 5: Process boxes in parallel (BOX-LEVEL PARALLELISM)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = []
-                for i, crop in enumerate(box_crops):
-                    future = executor.submit(self.process_single_box, crop, header_data, page_num, i)
-                    futures.append(future)
-                
-                # Collect results with progress tracking
-                page_results = []
-                completed = 0
-                for future in futures:
-                    row = future.result()
-                    if row:
-                        page_results.append(row)
-                    completed += 1
+                if start_page < 0: start_page = 0
+                if end_page >= total_pages: end_page = total_pages - 1
+                if start_page > end_page:
+                    self.log(f"⚠️ Skipping file {pdf_path.split('/')[-1]}: Invalid page range (Start: {start_page}, End: {end_page})")
+                    continue
                     
-                    # Log progress every 10 boxes
-                    if completed % 10 == 0:
-                        self.log(f"   ✓ Page {page_num + 1}: {completed}/{len(box_crops)} boxes completed")
-            self.log(f"✅ Page {page_num + 1}: Complete! Extracted {len(page_results)} voters")
-            all_results.extend(page_results)
+            except ValueError:
+                self.log("❌ Error reading skip values. Defaulting to process ALL pages.")
+                start_page = 0
+                end_page = total_pages - 1
 
-        self.log(f"\n🎉 All pages complete! Total voters: {len(all_results)}")
-        
-        # ✅ FINAL LOGIC: Overwrite Sr.No with sequential count
-        for i, row in enumerate(all_results, 1):
-            row['sr.no'] = str(i)
-        
-        # ✅ Save Excel only
-        self.save_excel(all_results)
+            self.log(f"📄 Processing pages {start_page + 1} to {end_page + 1} (Total: {total_pages})")
+            
+            max_workers = int(self.threads_var.get())
 
+            # Process pages sequentially
+            for page_num in range(start_page, end_page + 1):
+                self.log(f"   Now Processing Page {page_num + 1}...")
+                
+                # Step 1: Convert page to image
+                img = convert_from_path(
+                    pdf_path, dpi=DPI, first_page=page_num + 1, last_page=page_num + 1
+                )[0]
+                
+                # Step 2: Detect boxes
+                boxes, header_rect = get_boxes_and_header(pdf_path, page_num, img.width, img.height)
+                
+                if not boxes:
+                    self.log(f"   ⚠️ Page {page_num + 1}: No boxes detected")
+                    continue
+                
+                # Step 3: Extract header
+                header_data = {}
+                if header_rect:
+                    hc = img.crop(header_rect)
+                    h_preds = self.rec_predictor([hc], det_predictor=self.det_predictor)
+                    header_text = " ".join([l.text for l in h_preds[0].text_lines])
+                    header_text = clean_extracted_text(header_text)
+                    header_data['raw_header'] = header_text
+                    parsed_header = parse_header(header_text)
+                    header_data.update(parsed_header)
+                
+                # Step 4: Prepare box crops
+                box_crops = []
+                for b in boxes:
+                    c = img.crop((b[0], b[1], b[0] + b[2], b[1] + b[3]))
+                    if np.mean(np.array(c.convert("L"))) < 250:
+                        box_crops.append(c)
+                
+                # Step 5: Process boxes in parallel
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for i, crop in enumerate(box_crops):
+                        future = executor.submit(self.process_single_box, crop, header_data, page_num, i)
+                        futures.append(future)
+                    
+                    page_results = []
+                    for future in futures:
+                        row = future.result()
+                        if row:
+                            page_results.append(row)
+                
+                # Sort and Interpolate
+                page_results.sort(key=lambda x: x['box_idx'])
+                self.interpolate_serial_numbers(page_results)
+                
+                # Cleanup internal key
+                for r in page_results:
+                    r.pop('box_idx', None)
+                    
+                all_results.extend(page_results)
+                self.log(f"   ✅ Page {page_num + 1} Done. Voters found: {len(page_results)}")
+
+            # ✅ FINAL LOGIC: Overwrite Sr.No with sequential count
+            for i, row in enumerate(all_results, 1):
+                row['sr.no'] = str(i)
+            
+            # ✅ Save Excel for THIS file
+            self.save_excel(all_results, pdf_path)
+
+        self.log(f"\n🎉 BATCH COMPLETED! All PDF files processed.")
+        messagebox.showinfo("Batch Complete", "All files have been processed successfully!")
     def process_single_box(self, crop, header_data, page_num, box_num):
         """
         Process a single box with OCR
