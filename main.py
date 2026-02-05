@@ -604,7 +604,8 @@ class VoterExtractorApp:
                     page_results = []
                     for future in futures:
                         row = future.result()
-                        if row:
+                        # Only add rows that have a voter ID (filter out headers/noise)
+                        if row and row.get('voter_id', '').strip():
                             page_results.append(row)
                 
                 # Sort and Interpolate
