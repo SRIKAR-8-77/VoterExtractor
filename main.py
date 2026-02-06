@@ -40,6 +40,9 @@ def clean_extracted_text(text):
     # 2. FIX SPELLING: Change "लिग :", "लीग :", "लंग :" to "लिंग :"
     text = re.sub(r"(?:लिग|लीग|लंग)\s*:", "लिंग :", text)
     
+    # 2b. FIX AGE SPELLING: Change "विय :" to "वय :"
+    text = re.sub(r"विय\s*:", "वय :", text)
+    
     # 3. GENDER FIX (Now works because spelling is fixed)
     def fix_gender(match):
         val = match.group(1)
@@ -326,16 +329,16 @@ class VoterExtractorApp:
         # Column Selection (all 13 columns available)
         self.all_columns = [
             ('sr.no', 'Serial Number'),
+            ('मतदाराचे पूर्ण', 'Full Name'),
+            ('लिंग', 'Gender'),
+            ('वय', 'Age'),
             ('s', 'S-Number'),
             ('voter_id', 'Voter ID'),
             ('निवार्चन गण', 'Electoral Constituency'),
-            ('यादी भाग क्र.', 'Part Number'),
-            ('पत्ता', 'Address'),
             ('मतदान केंद्र', 'Polling Station'),
-            ('मतदाराचे पूर्ण', 'Full Name'),
+            ('पत्ता', 'Address'),
+            ('यादी भाग क्र.', 'Part Number'),
             ('घर क्रमांक', 'House Number'),
-            ('लिंग', 'Gender'),
-            ('वय', 'Age'),
             ('header', 'Raw Header'),
             ('is_deleted', 'Deleted Flag')
         ]
@@ -686,10 +689,10 @@ class VoterExtractorApp:
                     
                 all_results.extend(page_results)
                 self.log(f"   ✅ Page {page_num + 1} Done. Voters found: {len(page_results)}")
-
             # ✅ FINAL LOGIC: Overwrite Sr.No with sequential count
             for i, row in enumerate(all_results, 1):
                 row['sr.no'] = str(i)
+            
             
             # ✅ Save Excel with specific filename
             self.save_excel(all_results, source_pdf_path=pdf_path)
@@ -721,6 +724,10 @@ class VoterExtractorApp:
             
             # ✅ Parse into structured data (Kaggle-faithful)
             row = parse_box_text(cleaned_txt, header_data)
+            
+            # Store raw text for debugging/verification
+            row['raw_text'] = raw_txt
+            row['cleaned_text'] = cleaned_txt
             
             # Add box index for sorting
             row['box_idx'] = box_num
@@ -775,19 +782,19 @@ class VoterExtractorApp:
 
         self.log("📊 Formatting Excel...")
         
-        # Get selected columns from checkboxes
+        # Get selected columns from checkboxes (order matches self.all_columns)
         all_possible_columns = [
             'sr.no',
+            'मतदाराचे पूर्ण',
+            'लिंग',
+            'वय',
             's',
             'voter_id',
             'निवार्चन गण',
-            'यादी भाग क्र.',
-            'पत्ता',
             'मतदान केंद्र',
-            'मतदाराचे पूर्ण',
+            'पत्ता',
+            'यादी भाग क्र.',
             'घर क्रमांक',
-            'लिंग',
-            'वय',
             'header',
             'is_deleted'
         ]
@@ -842,7 +849,7 @@ class VoterExtractorApp:
                     val_len = len(str(row_data.get(col_name, '')))
                     if val_len > max_len:
                         max_len = val_len
-                ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 50)
+                    ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 50)
             
             wb.save(output_file)
             self.log(f"✅ Excel saved: {output_file}")
@@ -851,6 +858,52 @@ class VoterExtractorApp:
         except Exception as e:
             self.log(f"❌ Excel export failed: {e}")
             messagebox.showerror("Error", f"Failed to save Excel file:\n{e}")
+    
+    def save_raw_text(self, data, source_pdf_path=None):
+        """Save raw OCR text in format: PAGE → HEADER → BOX X-Y"""
+        if not data:
+            return
+        
+        # Generate output filename
+        if source_pdf_path:
+            import os
+            base_name = os.path.splitext(os.path.basename(source_pdf_path))[0]
+            output_file = f"{base_name}_raw_text.txt"
+        else:
+            output_file = "raw_text_output.txt"
+        
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write("--- RAW EXTRACTED VOTER DATA ---\n\n\n")
+                
+                # Group by page (using header as page indicator)
+                current_page = 1
+                current_header = None
+                box_in_page = 1
+                
+                for row in data:
+                    header = row.get('header', '')
+                    
+                    # New page detected (header changed)
+                    if header != current_header:
+                        if current_header is not None:
+                            current_page += 1
+                        current_header = header
+                        box_in_page = 1
+                        
+                        # Write page header
+                        f.write(f"=== PAGE {current_page} ===\n")
+                        f.write(f"HEADER: {header if header else '(No header)'}\n\n")
+                    
+                    # Write box text - show BOTH raw and cleaned for comparison
+                    f.write(f"BOX {box_in_page} (RAW): {row.get('raw_text', 'N/A')}\n")
+                    f.write(f"BOX {box_in_page} (CLEANED - given to parser): {row.get('cleaned_text', 'N/A')}\n\n")
+                    
+                    box_in_page += 1
+            
+            self.log(f"📄 Raw text saved: {output_file}")
+        except Exception as e:
+            self.log(f"❌ Error saving raw text: {e}")
 
 
 # ---------------- RUN ----------------
