@@ -183,6 +183,7 @@ def parse_box_text(text, header_data):
     row_data['निवार्चन गण'] = header_data.get('gan', '')
     row_data['यादी भाग क्र.'] = header_data.get('part_no', '')
     row_data['पत्ता'] = header_data.get('address', '')
+    row_data['मतदान केंद्र'] = header_data.get('polling_station', '')
     
     # --- NAME EXTRACTION (Robust) ---
     row_data['मतदाराचे पूर्ण'] = extract_until_delimiter(
@@ -322,11 +323,27 @@ class VoterExtractorApp:
         self.device_var = tk.StringVar(value="auto")
         self.available_devices = self.detect_devices()
         
-
+        # Column Selection (all 13 columns available)
+        self.all_columns = [
+            ('sr.no', 'Serial Number'),
+            ('s', 'S-Number'),
+            ('voter_id', 'Voter ID'),
+            ('निवार्चन गण', 'Electoral Constituency'),
+            ('यादी भाग क्र.', 'Part Number'),
+            ('पत्ता', 'Address'),
+            ('मतदान केंद्र', 'Polling Station'),
+            ('मतदाराचे पूर्ण', 'Full Name'),
+            ('घर क्रमांक', 'House Number'),
+            ('लिंग', 'Gender'),
+            ('वय', 'Age'),
+            ('header', 'Raw Header'),
+            ('is_deleted', 'Deleted Flag')
+        ]
         
-        # ✅ Fixed 12-column structure (no user selection needed)
-        # Columns: sr.no, s, voter_id, निवार्चन गण, यादी भाग क्र., पत्ता,
-        #          मतदाराचे पूर्ण, घर क्रमांक, लिंग, वय, header, is_deleted
+        # Column checkbox variables (all enabled by default)
+        self.column_vars = {}
+        for col_id, col_name in self.all_columns:
+            self.column_vars[col_id] = tk.BooleanVar(value=True)
         
         # Build UI first (creates log_area)
         self.build_ui()
@@ -414,6 +431,7 @@ class VoterExtractorApp:
         btn_frame.pack(fill="x", padx=10, pady=5)
         
         ttk.Button(btn_frame, text="📂 Add PDF Files", command=self.add_files, style="Big.TButton").pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="📁 Add Folder", command=self.add_folder, style="Big.TButton").pack(side="left", padx=10)
         ttk.Button(btn_frame, text="🗑️ Clear List", command=self.clear_files, style="Big.TButton").pack(side="left", padx=10)
         
         # Listbox to show selected files
@@ -454,13 +472,41 @@ class VoterExtractorApp:
         # But wait, Apply to All was for SKIP settings. If SKIP is gone, this is useless.
         # Removing Apply to All as well.
 
-        # Step 3: Output Info
-        frame_output = ttk.LabelFrame(self.root, text="Step 3: Output Format", style="Big.TLabelframe")
-        frame_output.pack(fill="x", padx=20, pady=20)
+        # Step 3: Column Selector
+        frame_columns = ttk.LabelFrame(self.root, text="Step 3: Select Columns to Export", style="Big.TLabelframe")
+        frame_columns.pack(fill="x", padx=20, pady=20)
         
-        ttk.Label(frame_output, text="✅ Excel files will be saved with 12 columns:", style="Big.TLabel").pack(padx=20, pady=10)
-        ttk.Label(frame_output, text="sr.no, s, voter_id, निवार्चन गण, यादी भाग क्र., पत्ता, मतदाराचे पूर्ण, घर क्रमांक, लिंग, वय, header, is_deleted", 
-                 font=("Helvetica", 14)).pack(padx=20, pady=5)
+        ttk.Label(frame_columns, text="✅ Choose which columns to include in Excel:", style="Big.TLabel").pack(padx=20, pady=10)
+        
+        # Create grid for checkboxes (3 columns)
+        checkbox_frame = ttk.Frame(frame_columns)
+        checkbox_frame.pack(padx=20, pady=10)
+        
+        for idx, (col_id, col_name) in enumerate(self.all_columns):
+            row = idx // 3
+            col = idx % 3
+            cb = ttk.Checkbutton(
+                checkbox_frame,
+                text=f"{col_id} ({col_name})",
+                variable=self.column_vars[col_id],
+                style="Big.TCheckbutton"
+            )
+            cb.grid(row=row, column=col, sticky="w", padx=10, pady=5)
+        
+        # Select All / Deselect All buttons
+        button_frame = ttk.Frame(frame_columns)
+        button_frame.pack(pady=10)
+        
+        def select_all():
+            for var in self.column_vars.values():
+                var.set(True)
+        
+        def deselect_all():
+            for var in self.column_vars.values():
+                var.set(False)
+        
+        ttk.Button(button_frame, text="Select All", command=select_all).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Deselect All", command=deselect_all).pack(side="left", padx=5)
 
         # Step 4: Start Button (Moved down)
         ttk.Button(
@@ -487,9 +533,31 @@ class VoterExtractorApp:
                 self.file_paths.append(f)
                 self.file_listbox.insert(tk.END, f) # Simply show full path for clarity
     
+    def add_folder(self):
+        """Select a folder and add all PDF files in it"""
+        import glob
+        folder = filedialog.askdirectory(title="Select Folder Containing PDFs")
+        if folder:
+            # Find all PDF files in the folder
+            pdf_files = glob.glob(os.path.join(folder, "*.pdf"))
+            if not pdf_files:
+                messagebox.showinfo("No PDFs Found", f"No PDF files found in:\n{folder}")
+                return
+            
+            # Add all found PDFs
+            added_count = 0
+            for f in pdf_files:
+                if f not in self.file_paths:
+                    self.file_paths.append(f)
+                    self.file_listbox.insert(tk.END, f)
+                    added_count += 1
+            
+            messagebox.showinfo("Folder Added", f"Added {added_count} PDF file(s) from:\n{folder}")
+    
     def clear_files(self):
         self.file_paths = []
         self.file_listbox.delete(0, tk.END)
+
 
     # ---------- PROCESS ----------
     def start_processing(self):
@@ -700,21 +768,22 @@ class VoterExtractorApp:
     # ---------- EXCEL ----------
     # ---------- EXCEL ----------
     def save_excel(self, data, source_pdf_path=None):
-        """Save extracted data to Excel with 12-column structure (Excel only)"""
+        """Save extracted data to Excel with 13-column structure (Excel only)"""
         if not data:
             self.log("⚠️  No data to save")
             return
 
         self.log("📊 Formatting Excel...")
         
-        # ✅ EXACT 12 COLUMNS (Final Structure)
-        final_columns = [
+        # Get selected columns from checkboxes
+        all_possible_columns = [
             'sr.no',
             's',
             'voter_id',
             'निवार्चन गण',
             'यादी भाग क्र.',
             'पत्ता',
+            'मतदान केंद्र',
             'मतदाराचे पूर्ण',
             'घर क्रमांक',
             'लिंग',
@@ -722,6 +791,17 @@ class VoterExtractorApp:
             'header',
             'is_deleted'
         ]
+        
+        # Filter to only selected columns
+        final_columns = [col for col in all_possible_columns if self.column_vars[col].get()]
+        
+        # Log selected columns for debugging
+        self.log(f"📋 Selected columns ({len(final_columns)}/{len(all_possible_columns)}): {', '.join(final_columns)}")
+        
+        if not final_columns:
+            self.log("⚠️  No columns selected! Please select at least one column.")
+            messagebox.showwarning("No Columns", "Please select at least one column to export.")
+            return
         
         # Ensure all columns exist in data
         for row in data:
