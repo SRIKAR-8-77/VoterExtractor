@@ -1,0 +1,31 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "80:8000"
+    environment:
+      - OCR_BATCH_SIZE=32
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Cache Surya models between container restarts
+      - model-cache:/root/.cache/datalab
+      # Persist processed outputs
+      - output-data:/tmp/pdf_processor/outputs
+      # Persist uploaded files
+      - uploads:/tmp/pdf_processor/uploads
+    restart: unless-stopped
+    # ── Uncomment below for GPU support ──────────────────────
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  model-cache:
+  output-data:
+  uploads:
