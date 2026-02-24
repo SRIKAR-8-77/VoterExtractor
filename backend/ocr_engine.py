@@ -15,7 +15,7 @@ from typing import Callable, Optional
 
 import numpy as np
 import pdfplumber
-from pdf2image import convert_from_path
+import fitz
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -193,13 +193,12 @@ def extract_pdf(
         _progress(page_num + 1, total_pages, f"Processing page {page_num + 1}")
 
         try:
-            # Rasterize single page at DPI=800 — matches notebook exactly
-            img = convert_from_path(
-                pdf_path,
-                dpi=DPI,
-                first_page=page_num + 1,
-                last_page=page_num + 1,
-            )[0]
+            # Rasterize single page at high DPI using PyMuPDF (fitz)
+            with fitz.open(pdf_path) as doc:
+                page = doc[page_num]
+                mat = fitz.Matrix(DPI / 72.0, DPI / 72.0)
+                pix = page.get_pixmap(matrix=mat)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
             boxes, header_rect = get_boxes_and_header(
                 pdf_path, page_num, img.width, img.height
@@ -247,26 +246,32 @@ def extract_pdf(
             output_lines.append(f"HEADER: {header_text}")
             output_lines.append("")
 
-            # OCR each voter box individually — matches notebook behaviour
-            box_count = 0
+            # OCR all valid voter boxes in a single batch for maximum speed
+            valid_crops = []
+            valid_indices = []
+            
             for i, (x, y, w, h) in enumerate(boxes):
                 crop = img.crop((x, y, x + w, y + h))
-
                 # Skip blank / all-white boxes
-                if np.mean(np.array(crop.convert("L"))) > 250:
-                    continue
+                if np.mean(np.array(crop.convert("L"))) <= 250:
+                    valid_crops.append(crop)
+                    valid_indices.append(i)
 
+            box_count = 0
+            if valid_crops:
                 try:
                     with _ocr_lock:
-                        preds = rec_predictor([crop], det_predictor=det_predictor)
-                    raw_text = " | ".join([ln.text for ln in preds[0].text_lines])
-
-                    row = (i // 3) + 1
-                    col = (i % 3) + 1
-                    output_lines.append(f"BOX {row}-{col}: {raw_text}")
-                    box_count += 1
+                        preds = rec_predictor(valid_crops, det_predictor=det_predictor)
+                    
+                    for crop_idx, pred in zip(valid_indices, preds):
+                        raw_text = " | ".join([ln.text for ln in pred.text_lines])
+                        row = (crop_idx // 3) + 1
+                        col = (crop_idx % 3) + 1
+                        output_lines.append(f"BOX {row}-{col}: {raw_text}")
+                        
+                    box_count = len(valid_crops)
                 except Exception as e:
-                    logger.warning("Error on box %d page %d: %s", i, page_num + 1, e)
+                    logger.warning("Error processing batch on page %d: %s", page_num + 1, e)
 
             logger.info("Extracted %d boxes from page %d", box_count, page_num + 1)
 

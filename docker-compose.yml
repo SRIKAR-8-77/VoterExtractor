@@ -4,9 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "80:8000"
+      - "3000:8000"
     environment:
-      - OCR_BATCH_SIZE=32
+      - OCR_BATCH_SIZE=256
+      - RECOGNITION_BATCH_SIZE=256
+      - DETECTION_BATCH_SIZE=256
+      - OMP_NUM_THREADS=32
       - PYTHONUNBUFFERED=1
     volumes:
       # Cache Surya models between container restarts
