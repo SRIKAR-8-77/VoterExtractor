@@ -244,9 +244,19 @@ def parse_raw_text(raw_lines: list[str]) -> list[dict]:
             current_header["raw_header"] = header_text
 
         elif line.startswith("BOX"):
-            box_text = re.sub(r"BOX \d+-\d+:\s*", "", line).strip()
+            # Extract the unique box id: `BOX {page_num}_{crop_idx}: ...`
+            match = re.match(r"BOX\s+([0-9_]+):\s*(.*)", line)
+            if match:
+                box_id = match.group(1)
+                box_text = match.group(2).strip()
+            else:
+                box_id = "unknown"
+                box_text = re.sub(r"BOX.*:\s*", "", line).strip()
+                
             cleaned_box = clean_extracted_text(box_text)
             row = parse_box_text(cleaned_box, current_header)
+            row["_box_id"] = box_id
+            
             if row.get("voter_id", "").strip():
                 all_results.append(row)
 

@@ -28,7 +28,6 @@ DPI = 800
 _foundation_predictor = None
 _det_predictor = None
 _rec_predictor = None
-_ocr_lock = threading.Lock()
 
 
 def load_models():
@@ -133,16 +132,6 @@ def get_boxes_and_header(pdf_path: str, page_num: int, img_w: int, img_h: int):
         return boxes, header_rect
 
 
-# ── Auto Page Detection ──────────────────────────────────────
-
-
-def is_valid_voter_page(first_box_text: str) -> bool:
-    """Check if page contains voter data by examining first box text."""
-    return bool(
-        re.search(r"[A-Z]{2,}\d+|[A-Z]+\d{3,}|[A-Z]+/[0-9]+/", first_box_text)
-    )
-
-
 # ── Main Extraction Pipeline ─────────────────────────────────
 
 
@@ -150,6 +139,7 @@ def extract_pdf(
     pdf_path: str,
     progress_callback: Optional[Callable] = None,
     max_pages: Optional[int] = None,
+    job_id: str = "temp"
 ) -> list[str]:
     """
     Full Stage 1 pipeline: Rasterize PDF → Detect grids → OCR → Return raw text lines.
@@ -160,16 +150,22 @@ def extract_pdf(
     - Auto-detection: skips intro pages, stops immediately when the voter
       section ends (first non-voter page after start triggers a break)
     - OCR is called per-crop with a threading lock (matches notebook behaviour)
+    - Saves crop images to disk temporarily if a job_id is provided.
 
     Args:
         pdf_path: Absolute path to the PDF file.
         progress_callback: Optional callback(current, total, stage_name).
         max_pages: Optional limit on number of pages to process (for testing).
+        job_id: Unique identifier for the job, used for temp crop storage.
 
     Returns:
         List of raw text lines (same format as the _RAW.txt files from the notebook).
     """
+    import os
     rec_predictor, det_predictor = load_models()
+    
+    crop_dir = os.path.join("output", f"{job_id}_crops")
+    os.makedirs(crop_dir, exist_ok=True)
 
     def _progress(current, total, stage):
         if progress_callback:
@@ -186,8 +182,7 @@ def extract_pdf(
 
     logger.info("Processing %d pages at DPI=%d", total_pages, DPI)
 
-    output_lines = ["--- RAW EXTRACTED VOTER DATA ---", ""]
-    processing_started = False
+    output_lines = []
 
     for page_num in range(total_pages):
         _progress(page_num + 1, total_pages, f"Processing page {page_num + 1}")
@@ -207,39 +202,14 @@ def extract_pdf(
             if not boxes:
                 continue
 
-            # Check first box to determine whether this is a voter page
-            is_valid = False
-            try:
-                b = boxes[0]
-                crop = img.crop((b[0], b[1], b[0] + b[2], b[1] + b[3]))
-                with _ocr_lock:
-                    preds = rec_predictor([crop], det_predictor=det_predictor)
-                txt_chk = " ".join([ln.text for ln in preds[0].text_lines])
-                is_valid = is_valid_voter_page(txt_chk)
-            except Exception:
-                pass
-
-            # Auto-detection logic — identical to the notebook
-            if not processing_started:
-                if not is_valid:
-                    logger.info("Skip Page %d (Intro)", page_num + 1)
-                    continue
-                else:
-                    logger.info("Detection Started at Page %d", page_num + 1)
-                    processing_started = True
-            else:
-                if not is_valid:
-                    logger.info("End Detected at Page %d — stopping", page_num + 1)
-                    break
-
+            # Simply process the page and let data_parser.py scrub empty boxes later.
             logger.info("Processing Page %d...", page_num + 1)
 
             # Extract header text
             header_text = ""
             if header_rect:
                 hc = img.crop(header_rect)
-                with _ocr_lock:
-                    h_preds = rec_predictor([hc], det_predictor=det_predictor)
+                h_preds = rec_predictor([hc], det_predictor=det_predictor)
                 header_text = " ".join([ln.text for ln in h_preds[0].text_lines])
 
             output_lines.append(f"\n=== PAGE {page_num + 1} ===")
@@ -260,14 +230,17 @@ def extract_pdf(
             box_count = 0
             if valid_crops:
                 try:
-                    with _ocr_lock:
-                        preds = rec_predictor(valid_crops, det_predictor=det_predictor)
+                    preds = rec_predictor(valid_crops, det_predictor=det_predictor)
                     
                     for crop_idx, pred in zip(valid_indices, preds):
+                        crop_img = valid_crops[valid_indices.index(crop_idx)]
+                        
+                        # Save the crop image for the zip bundle later
+                        crop_filename = f"{page_num}_{crop_idx}.jpg"
+                        crop_img.save(os.path.join(crop_dir, crop_filename), "JPEG")
+                        
                         raw_text = " | ".join([ln.text for ln in pred.text_lines])
-                        row = (crop_idx // 3) + 1
-                        col = (crop_idx % 3) + 1
-                        output_lines.append(f"BOX {row}-{col}: {raw_text}")
+                        output_lines.append(f"BOX {page_num}_{crop_idx}: {raw_text}")
                         
                     box_count = len(valid_crops)
                 except Exception as e:
@@ -279,7 +252,7 @@ def extract_pdf(
             logger.error("Error on page %d: %s", page_num + 1, e)
             continue
 
-    if not processing_started:
+    if not output_lines:
         logger.warning("No voter pages detected in %s", pdf_path)
         return []
 
