@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 # DPI=800 matches the notebook for high-quality rasterization
 DPI = 800
 
+import os
+# Setup hardware optimized batch sizes for Surya OCR from environment variables
+# Fallbacks match original native behavior without env vars
+os.environ["RECOGNITION_BATCH_SIZE"] = os.getenv("OCR_BATCH_SIZE", "4")
+os.environ["DETECTOR_BATCH_SIZE"] = os.getenv("OCR_BATCH_SIZE", "4")
+# Note: torch dataloader workers are usually configured via batch processing wrappers or PyTorch natively, 
+# but setting this allows surya / torch to adjust if applicable.
+os.environ["TORCH_DATALOADER_WORKERS"] = os.getenv("TORCH_DATALOADER_WORKERS", "0")
+
 # ── Global model holders (lazy-loaded) ───────────────────────
 _foundation_predictor = None
 _det_predictor = None
@@ -50,6 +59,18 @@ def load_models():
     )
     logger.info("Models loaded in %.1fs", time.time() - t)
     return _rec_predictor, _det_predictor
+
+
+def _try_clear_cuda():
+    """Attempt to clear CUDA error state to prevent cascading failures."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            # Synchronize to clear any pending CUDA errors
+            torch.cuda.synchronize()
+    except Exception:
+        pass
 
 
 # ── Grid Detection ───────────────────────────────────────────
@@ -202,49 +223,80 @@ def extract_pdf(
             if not boxes:
                 continue
 
-            # Simply process the page and let data_parser.py scrub empty boxes later.
-            logger.info("Processing Page %d...", page_num + 1)
+            # Voter pages in 3-col × 10-row grids have ~30 boxes.
+            # Intro / index pages have far fewer & irregular boxes — skip them.
+            if len(boxes) < 6:
+                logger.info("Skip Page %d (only %d boxes — likely intro/index)", page_num + 1, len(boxes))
+                continue
+
+            logger.info("Processing Page %d (%d boxes)...", page_num + 1, len(boxes))
 
             # Extract header text
             header_text = ""
             if header_rect:
                 hc = img.crop(header_rect)
-                h_preds = rec_predictor([hc], det_predictor=det_predictor)
-                header_text = " ".join([ln.text for ln in h_preds[0].text_lines])
+                try:
+                    h_preds = rec_predictor([hc], det_predictor=det_predictor)
+                    header_text = " ".join([ln.text for ln in h_preds[0].text_lines])
+                except Exception as e:
+                    logger.warning("Header OCR failed on page %d: %s", page_num + 1, e)
+                    _try_clear_cuda()
 
             output_lines.append(f"\n=== PAGE {page_num + 1} ===")
             output_lines.append(f"HEADER: {header_text}")
             output_lines.append("")
 
-            # OCR all valid voter boxes in a single batch for maximum speed
+            # OCR all valid voter boxes in a single batch for maximum GPU speed
             valid_crops = []
             valid_indices = []
             
             for i, (x, y, w, h) in enumerate(boxes):
+                # Ensure dimensions are valid for deep learning CNNs 
+                if w < 10 or h < 10:
+                    continue
+
+                # Skip oversized boxes (intro/index page artefacts)
+                if w > 4000 or h > 3000:
+                    logger.debug("Skip oversized box %d on page %d: %dx%d", i, page_num + 1, w, h)
+                    continue
+                    
                 crop = img.crop((x, y, x + w, y + h))
                 # Skip blank / all-white boxes
-                if np.mean(np.array(crop.convert("L"))) <= 250:
-                    valid_crops.append(crop)
-                    valid_indices.append(i)
+                if np.mean(np.array(crop.convert("L"))) > 250:
+                    continue
+                    
+                valid_crops.append(crop)
+                valid_indices.append(i)
 
             box_count = 0
             if valid_crops:
-                try:
-                    preds = rec_predictor(valid_crops, det_predictor=det_predictor)
+                # Process in mini-batches to prevent Surya OCR internal tensor bugs
+                # (e.g. "index 233 is out of bounds for dimension 0 with size 233")
+                # while keeping the H100 utilized efficiently.
+                BATCH_SIZE = 10
+                
+                for batch_start in range(0, len(valid_crops), BATCH_SIZE):
+                    batch_crops = valid_crops[batch_start:batch_start + BATCH_SIZE]
+                    batch_indices = valid_indices[batch_start:batch_start + BATCH_SIZE]
                     
-                    for crop_idx, pred in zip(valid_indices, preds):
-                        crop_img = valid_crops[valid_indices.index(crop_idx)]
+                    try:
+                        preds = rec_predictor(batch_crops, det_predictor=det_predictor)
                         
-                        # Save the crop image for the zip bundle later
-                        crop_filename = f"{page_num}_{crop_idx}.jpg"
-                        crop_img.save(os.path.join(crop_dir, crop_filename), "JPEG")
-                        
-                        raw_text = " | ".join([ln.text for ln in pred.text_lines])
-                        output_lines.append(f"BOX {page_num}_{crop_idx}: {raw_text}")
-                        
-                    box_count = len(valid_crops)
-                except Exception as e:
-                    logger.warning("Error processing batch on page %d: %s", page_num + 1, e)
+                        for crop_idx, pred in zip(batch_indices, preds):
+                            # The crop_idx's position in this batch corresponds to zip order
+                            crop_img = batch_crops[batch_indices.index(crop_idx)]
+                            
+                            # Save the crop image
+                            crop_filename = f"{page_num}_{crop_idx}.jpg"
+                            crop_img.save(os.path.join(crop_dir, crop_filename), "JPEG")
+                            
+                            raw_text = " | ".join([ln.text for ln in pred.text_lines])
+                            output_lines.append(f"BOX {page_num}_{crop_idx}: {raw_text}")
+                            
+                        box_count += len(batch_crops)
+                    except Exception as e:
+                        logger.warning("Error processing batch chunk on page %d: %s", page_num + 1, e)
+                        _try_clear_cuda()
 
             logger.info("Extracted %d boxes from page %d", box_count, page_num + 1)
 

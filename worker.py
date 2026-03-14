@@ -130,8 +130,10 @@ def background_worker_loop():
     state.master_mp_queue = ctx.Queue()
     
     import concurrent.futures
+    import os
+    pdf_workers = int(os.environ.get("PDF_PROCESSING_WORKERS", 3))
     # Allow exactly 3 PDFs to burst the hardware simultaneously
-    pool = concurrent.futures.ProcessPoolExecutor(max_workers=3, mp_context=ctx)
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers=pdf_workers, mp_context=ctx)
 
     def drain_queue():
         """Helper to instantly process all messages waiting from child processes."""
@@ -189,7 +191,7 @@ def background_worker_loop():
                 
             # Abandon running tasks and recreate the pool
             pool.shutdown(wait=False, cancel_futures=True)
-            pool = concurrent.futures.ProcessPoolExecutor(max_workers=3, mp_context=ctx)
+            pool = concurrent.futures.ProcessPoolExecutor(max_workers=pdf_workers, mp_context=ctx)
             
             # Wipe local dict
             state.active_jobs = {}

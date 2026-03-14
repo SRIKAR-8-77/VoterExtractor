@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Monitor</title>
+    <style>
+        body { font-family: -apple-system, system-ui, sans-serif; background: #0f172a; color: #fff; padding: 2rem; max-width: 800px; margin: 0 auto; }
+        .card { background: #1e293b; padding: 1.5rem; border-radius: 8px; margin-bottom: 1rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
+        .stat-box { background: #334155; padding: 1rem; border-radius: 6px; text-align: center; }
+        .stat-box h3 { margin: 0 0 0.5rem 0; font-size: 0.9rem; color: #94a3b8; text-transform: uppercase; }
+        .stat-box .value { font-size: 2rem; font-weight: bold; color: #38bdf8; }
+        .progress-bar { width: 100%; background: #475569; height: 8px; border-radius: 4px; margin-top: 1rem; overflow: hidden; }
+        .progress-fill { height: 100%; background: #38bdf8; transition: width 0.3s ease; }
+        .gpu-info { margin-top: 0.5rem; font-size: 0.9rem; color: #cbd5e1; }
+    </style>
+</head>
+<body>
+    <h1>Real-time System Monitor</h1>
+    
+    <div class="stat-grid">
+        <div class="card stat-box">
+            <h3>CPU Usage</h3>
+            <div class="value" id="cpu-value">--%</div>
+            <div class="progress-bar"><div class="progress-fill" id="cpu-bar" style="width: 0%"></div></div>
+        </div>
+        
+        <div class="card stat-box">
+            <h3>RAM Usage</h3>
+            <div class="value" id="ram-value">--%</div>
+            <div class="progress-bar"><div class="progress-fill" id="ram-bar" style="width: 0%"></div></div>
+            <div class="gpu-info" id="ram-details">-- GB / -- GB</div>
+        </div>
+        
+        <div class="card stat-box">
+            <h3>GPU Usage & Memory</h3>
+            <div class="value" id="gpu-value">--</div>
+            <div class="progress-bar"><div class="progress-fill" id="gpu-bar" style="width: 0%"></div></div>
+            <div class="gpu-info" id="gpu-details">Initializing...</div>
+        </div>
+    </div>
+
+    <script>
+        async function fetchStats() {
+            try {
+                const res = await fetch('/api/system');
+                const data = await res.json();
+                
+                document.getElementById('cpu-value').innerText = data.cpu_percent + '%';
+                document.getElementById('cpu-bar').style.width = data.cpu_percent + '%';
+                
+                document.getElementById('ram-value').innerText = data.ram_percent + '%';
+                document.getElementById('ram-bar').style.width = data.ram_percent + '%';
+                document.getElementById('ram-details').innerText = `${data.ram_used_gb} GB / ${data.ram_total_gb} GB`;
+                
+                if (data.gpu_available) {
+                    let gpuText = 'Active';
+                    if (data.gpu_memory_percent !== null) {
+                        gpuText = data.gpu_memory_percent + '%';
+                        document.getElementById('gpu-bar').style.width = data.gpu_memory_percent + '%';
+                    } else {
+                        document.getElementById('gpu-bar').style.width = '100%';
+                        document.getElementById('gpu-bar').style.background = '#22c55e'; // green if can't measure exactly
+                    }
+                    
+                    document.getElementById('gpu-value').innerText = gpuText;
+                    document.getElementById('gpu-details').innerText = 
+                        `${data.gpu_name}\nRAM: ${data.gpu_memory_used_gb ?? '--'} GB / ${data.gpu_memory_total_gb ?? '--'} GB`;
+                } else {
+                    document.getElementById('gpu-value').innerText = 'N/A';
+                    document.getElementById('gpu-details').innerText = 'No GPU Detected';
+                }
+            } catch (err) {
+                console.error("Error fetching stats:", err);
+            }
+        }
+        
+        setInterval(fetchStats, 1000);
+        fetchStats();
+    </script>
+</body>
+</html>

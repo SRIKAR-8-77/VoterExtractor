@@ -37,7 +37,7 @@ with st.sidebar:
 # ─── Main Interface ───────────────────────────────────────────────
 st.title("📄 PDF to Excel: Voter Data Processor")
 
-tabs = st.tabs(["📤 Upload PDF", "📋 Processing Logs", "📥 Download Results"])
+tabs = st.tabs(["📤 Upload PDF", "📋 Processing Logs", "📥 Download Results", "🗄️ Upload Excel to DB"])
 
 # ─── Tab 1: Upload ───
 with tabs[0]:

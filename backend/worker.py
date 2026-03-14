@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import json
 import logging
 import traceback
 import multiprocessing
@@ -75,25 +76,95 @@ def process_pdf_isolated(task, progress_queue):
         output_path = os.path.join("output", output_filename)
         build_excel(results, output_path)
         
-        emit("info", f"[{filename}] Stage 4: Bundling images into ZIP...", stage="Zipping voter images...")
+        emit("info", f"[{filename}] Stage 4: Processing voter images...", stage="Processing voter images...")
         
-        # 4. Build ZIP file of crop images
+        # 4. Upload images to R2 or bundle into ZIP
         zip_filename = f"output_{job_id}_{filename}.zip"
         zip_path = os.path.join("output", zip_filename)
         crop_dir = os.path.join("output", f"{job_id}_crops")
         
-        with zipfile.ZipFile(zip_path, 'w') as zf:
-            for row in results:
-                box_id = row.get("_box_id")
-                sr_no = row.get("sr.no", "").strip()
-                if box_id and sr_no:
-                    img_path = os.path.join(crop_dir, f"{box_id}.jpg")
-                    if os.path.exists(img_path):
-                        zf.write(img_path, arcname=f"{sr_no}.jpg")
+        r2_base_path = task.get("r2_base_path")
+        
+        if r2_base_path and crop_dir and os.path.exists(crop_dir):
+            # Upload directly to Cloudflare R2 (creds from env vars)
+            emit("info", f"[{filename}] Uploading images to Cloudflare R2...", stage="Uploading to R2...")
+            
+            import boto3
+            from botocore.exceptions import ClientError
+            from dotenv import load_dotenv
+            load_dotenv()
+            
+            _r2_key = os.getenv("R2_ACCESS_KEY_ID")
+            _r2_secret = os.getenv("R2_SECRET_ACCESS_KEY")
+            _r2_endpoint = os.getenv("R2_ENDPOINT")
+            _r2_bucket = os.getenv("R2_BUCKET")
+            
+            if not all([_r2_key, _r2_secret, _r2_endpoint, _r2_bucket]):
+                emit("warning", f"[{filename}] R2 env vars not configured, falling back to ZIP")
+            else:
+                s3 = boto3.client(
+                    "s3",
+                    endpoint_url=_r2_endpoint,
+                    aws_access_key_id=_r2_key,
+                    aws_secret_access_key=_r2_secret,
+                    region_name="auto",
+                )
+                
+                base_path = r2_base_path.rstrip("/")
+                
+                manifest = []
+                upload_count = 0
+                for row in results:
+                    box_id = row.get("_box_id")
+                    sr_no = row.get("sr.no", "").strip()
+                    if not box_id or not sr_no:
+                        continue
                         
+                    img_path = os.path.join(crop_dir, f"{box_id}.jpg")
+                    if not os.path.exists(img_path):
+                        continue
+                        
+                    r2_key = f"{base_path}/{sr_no}.jpg"
+                    try:
+                        s3.upload_file(
+                            img_path,
+                            _r2_bucket,
+                            r2_key,
+                            ExtraArgs={"ContentType": "image/jpeg"},
+                        )
+                        manifest.append({"sr_no": sr_no, "r2_key": r2_key})
+                        upload_count += 1
+                    except ClientError as e:
+                        emit("warning", f"[{filename}] Failed to upload {sr_no}.jpg to R2: {e}")
+                
+                # Save manifest JSON
+                manifest_data = {
+                    "job_id": job_id,
+                    "r2_bucket": _r2_bucket,
+                    "r2_base_path": base_path,
+                    "image_count": upload_count,
+                    "images": manifest,
+                }
+                manifest_path = os.path.join("output", f"manifest_{job_id}.json")
+                with open(manifest_path, "w") as mf:
+                    json.dump(manifest_data, mf, indent=2)
+                
+                emit("info", f"[{filename}] Uploaded {upload_count} images to R2", stage="R2 upload complete")
+        else:
+            # Fallback: bundle into ZIP (for Streamlit UI / local usage)
+            if os.path.exists(crop_dir):
+                with zipfile.ZipFile(zip_path, 'w') as zf:
+                    for row in results:
+                        box_id = row.get("_box_id")
+                        sr_no = row.get("sr.no", "").strip()
+                        if box_id and sr_no:
+                            img_path = os.path.join(crop_dir, f"{box_id}.jpg")
+                            if os.path.exists(img_path):
+                                zf.write(img_path, arcname=f"{sr_no}.jpg")
+                                
         shutil.rmtree(crop_dir, ignore_errors=True)
         
-        emit("info", f"--- Successfully finished {filename} -> {output_filename} and {zip_filename} ---", stage="Completed")
+        emit("info", f"--- Successfully finished {filename} -> {output_filename} ---", stage="Completed")
     except Exception as e:
         if str(e) == "SYSTEM_ABORT":
             emit("warning", f"[{filename}] Processing aborted by user.", stage="Aborted")
@@ -133,8 +204,10 @@ def background_worker_loop():
     state.master_mp_queue = manager.Queue()
     
     import concurrent.futures
+    import os
+    pdf_workers = int(os.environ.get("PDF_PROCESSING_WORKERS", 2))
     # Allow exactly 2 PDFs simultaneously (3 overflows 24GB VRAM with Surya OCR models)
-    pool = concurrent.futures.ProcessPoolExecutor(max_workers=2, mp_context=ctx)
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers=pdf_workers, mp_context=ctx)
 
     def drain_queue():
         """Helper to instantly process all messages waiting from child processes."""
@@ -192,7 +265,7 @@ def background_worker_loop():
                 
             # Abandon running tasks and recreate the pool
             pool.shutdown(wait=False, cancel_futures=True)
-            pool = concurrent.futures.ProcessPoolExecutor(max_workers=2, mp_context=ctx)
+            pool = concurrent.futures.ProcessPoolExecutor(max_workers=pdf_workers, mp_context=ctx)
             
             # Wipe local dict
             state.active_jobs = {}

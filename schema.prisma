@@ -1,0 +1,497 @@
+// Voter App — PostgreSQL Schema (Neon)
+// Run: npx prisma migrate dev --name init
+// Run: npx prisma generate
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Local Body Types (enum) ───
+enum LocalBodyType {
+  Municipal_Corporation          @map("Municipal Corporation")
+  Municipal_Council              @map("Municipal Council / Nagar Panchayat")
+  ZP_PS                          @map("ZP/PS")
+  Gram_Panchayat                 @map("Gram Panchayat")
+}
+
+// ─── OTP Status (enum) ───
+enum OtpStatus {
+  sent
+  verified
+  expired
+}
+
+// ─── Registration Request Status (candidate access requests) ───
+enum RegistrationRequestStatus {
+  pending
+  approved
+  rejected
+}
+
+// ─── Color Tag (voter tagging by party) ───
+enum ColorTag {
+  R  // Red
+  Y  // Yellow
+  B  // Blue
+  N  // None
+}
+
+// ─── Local Bodies Table ───
+model LocalBody {
+  id        Int           @id @default(autoincrement())
+  name      String        @db.VarChar(255)
+  type      LocalBodyType
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+
+  voters    Voter[]
+  zpPsVoters ZpPsVoter[]
+  candidates CandidateAccess[]
+  divisions  ZpDivision[]
+  registrationRequests RegistrationRequest[]
+
+  @@unique([name, type])
+  @@index([type])
+  @@index([name])
+  @@map("local_bodies")
+}
+
+// ─── ZP/PS Division (गट) — shared per local body ───
+model ZpDivision {
+  id          Int      @id @default(autoincrement())
+  localBodyId Int      @map("local_body_id")
+  srNo        Int      @default(1) @map("sr_no")
+  name        String   @db.VarChar(255)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  localBody   LocalBody @relation(fields: [localBodyId], references: [id], onDelete: Cascade)
+  colleges    ZpElectoralCollege[]
+
+  @@unique([localBodyId, srNo])
+  @@unique([localBodyId, name])
+  @@index([localBodyId])
+  @@map("zp_divisions")
+}
+
+// ─── ZP/PS Electoral College (गण) — scoped per division (PS only) ───
+model ZpElectoralCollege {
+  id         Int      @id @default(autoincrement())
+  divisionId Int      @map("division_id")
+  srNo       Int      @default(1) @map("sr_no")
+  name       String   @db.VarChar(255)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  division   ZpDivision @relation(fields: [divisionId], references: [id], onDelete: Cascade)
+
+  @@unique([divisionId, srNo])
+  @@unique([divisionId, name])
+  @@index([divisionId])
+  @@map("zp_electoral_colleges")
+}
+
+// ─── Voters Table (Excel data: 5,000–6,000+ per local body) ───
+model Voter {
+  id              Int      @id @default(autoincrement())
+  localBodyId     Int      @map("local_body_id")
+
+  // Excel columns (mapped from Marathi headers)
+  srNo            Int?     @map("sr_no")                    // sr.no
+  s               String?  @db.VarChar(255)                 // s
+  voterId         String?  @map("voter_id") @db.VarChar(255) // voter_id
+  epicNo          String?  @map("epic_no") @db.VarChar(255) // EPIC Number
+  constituency    String?  @db.Text                         // निवार्चन गण
+  listPartNo      String?  @map("list_part_no") @db.VarChar(255) // यादी भाग क्र.
+  address         String?  @db.Text                         // पत्ता
+
+  // Name split from मतदाराचे पूर्ण (voter_full_name)
+  voterFirstName  String?  @map("voter_first_name") @db.VarChar(255)
+  voterMiddleName String?  @map("voter_middle_name") @db.VarChar(255)
+  voterLastName   String?  @map("voter_last_name") @db.VarChar(255)
+
+  houseNumber     String?  @map("house_number") @db.Text    // घर क्रमांक
+  gender          String?  @db.VarChar(100)                 // लिंग
+  age             String?  @db.VarChar(20)                  // वय (Marathi numerals)
+  header          String?  @db.Text                         // header
+  isDeleted       Boolean  @default(false) @map("is_deleted")
+  img             String?  @db.Text                         // Image URL
+
+  // Prabhag / Ward hierarchy (String to support both numbers and ZP/PS division names)
+  prabhagNo       String?  @map("prabhag_no") @db.VarChar(255)
+  wardNo          String?  @map("ward_no") @db.VarChar(255)
+
+  // ZP/PS sub-type: "ZP" (Zilla Parishad) or "PS" (Panchayat Samiti), null for other types
+  zpPsSubType     String?  @map("zp_ps_sub_type") @db.VarChar(2)
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  localBody       LocalBody @relation(fields: [localBodyId], references: [id], onDelete: Cascade)
+  partyTags       VoterPartyTag[]
+  partyCastes     VoterPartyCaste[]
+  partyMobiles    VoterPartyMobile[]
+  partyDollars    VoterPartyDollar[]
+
+  @@index([localBodyId])
+  @@index([localBodyId, prabhagNo, wardNo])
+  @@index([localBodyId, zpPsSubType, prabhagNo, wardNo])
+  @@index([voterId])
+  @@index([voterFirstName, voterLastName])
+  @@index([gender])
+  @@index([constituency])
+  @@map("voters")
+}
+
+// ─── ZP/PS Voters Table (Dedicated for Zilla Parishad & Panchayat Samiti) ───
+model ZpPsVoter {
+  id              Int      @id @default(autoincrement())
+  localBodyId     Int      @map("local_body_id")
+
+  // Excel columns
+  srNo            Int?     @map("sr_no")
+  s               String?  @db.VarChar(255)
+  voterId         String?  @map("voter_id") @db.VarChar(255)
+  epicNo          String?  @map("epic_no") @db.VarChar(255)
+  constituency    String?  @db.Text
+  listPartNo      String?  @map("list_part_no") @db.VarChar(255)
+  address         String?  @db.Text
+
+  // Name
+  voterFirstName  String?  @map("voter_first_name") @db.VarChar(255)
+  voterMiddleName String?  @map("voter_middle_name") @db.VarChar(255)
+  voterLastName   String?  @map("voter_last_name") @db.VarChar(255)
+
+  houseNumber     String?  @map("house_number") @db.Text
+  gender          String?  @db.VarChar(100)
+  age             String?  @db.VarChar(20)
+  header          String?  @db.Text
+  isDeleted       Boolean  @default(false) @map("is_deleted")
+  img             String?  @db.Text
+
+  // ZP/PS Specific Hierarchy
+  gat             String   @db.VarChar(255)                 // गट (Division)
+  gan             String?  @db.VarChar(255)                 // गण (Electoral College - optional for ZP)
+  boothNo         String   @map("booth_no") @db.VarChar(255) // Ward No. / Booth No.
+
+  zpPsSubType     String   @map("zp_ps_sub_type") @db.VarChar(2) // "ZP" or "PS"
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  localBody       LocalBody @relation(fields: [localBodyId], references: [id], onDelete: Cascade)
+  partyTags       ZpPsVoterPartyTag[]
+  partyCastes     ZpPsVoterPartyCaste[]
+  partyMobiles    ZpPsVoterPartyMobile[]
+  partyDollars    ZpPsVoterPartyDollar[]
+
+  @@index([localBodyId])
+  @@index([localBodyId, zpPsSubType, gat, gan, boothNo])
+  @@index([voterId])
+  @@index([voterFirstName, voterLastName])
+  @@index([gender])
+  @@map("zp_ps_voters")
+}
+
+// ─── Users (OTP-verified mobile app users) ───
+model User {
+  id         Int      @id @default(autoincrement())
+  phone      String   @unique @db.VarChar(10)
+  verifiedAt DateTime @default(now()) @map("verified_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("users")
+}
+
+// ─── OTPs (active OTP records) ───
+model Otp {
+  id        Int      @id @default(autoincrement())
+  phone     String   @db.VarChar(10)
+  otp       String   @db.VarChar(6)
+  verified  Boolean  @default(false)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([phone])
+  @@index([expiresAt])
+  @@map("otps")
+}
+
+// ─── OTP Logs (permanent audit trail) ───
+model OtpLog {
+  id         Int       @id @default(autoincrement())
+  phone      String    @db.VarChar(10)
+  otp        String    @db.VarChar(6)
+  status     OtpStatus @default(sent)
+  sentAt     DateTime  @default(now()) @map("sent_at")
+  verifiedAt DateTime? @map("verified_at")
+  expiresAt  DateTime  @map("expires_at")
+
+  @@index([phone])
+  @@index([sentAt(sort: Desc)])
+  @@index([status])
+  @@map("otp_logs")
+}
+
+// ─── Parties (political parties for candidates) ───
+model Party {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  candidates     CandidateAccess[]
+  voterTags      VoterPartyTag[]
+  zpPsVoterTags  ZpPsVoterPartyTag[]
+  castes         Caste[]
+  voterCastes    VoterPartyCaste[]
+  zpPsVoterCastes ZpPsVoterPartyCaste[]
+  voterMobiles   VoterPartyMobile[]
+  zpPsVoterMobiles ZpPsVoterPartyMobile[]
+  voterDollars   VoterPartyDollar[]
+  zpPsVoterDollars ZpPsVoterPartyDollar[]
+
+  @@map("parties")
+}
+
+// ─── Candidate Access (admin-controlled login access) ───
+model CandidateAccess {
+  id               Int       @id @default(autoincrement())
+  localBodyId      Int       @map("local_body_id")
+  partyId          Int?      @map("party_id")
+  prabhagNo        String    @map("prabhag_no") @db.VarChar(255)
+  wardNo           String    @map("ward_no") @db.VarChar(255)
+  zpPsSubType      String?   @map("zp_ps_sub_type") @db.VarChar(2)
+  name             String?   @db.VarChar(255)
+  phone            String    @db.VarChar(10)
+  karyakartaLimit  Int?      @map("karyakarta_limit")
+  isActive         Boolean   @default(true) @map("is_active")
+  premiumExpiresAt DateTime? @map("premium_expires_at")
+  profileImageUrl  String?   @map("profile_image_url") @db.Text
+  panelIconUrl     String?   @map("panel_icon_url") @db.Text
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  localBody        LocalBody @relation(fields: [localBodyId], references: [id], onDelete: Cascade)
+  party            Party?    @relation(fields: [partyId], references: [id], onDelete: SetNull)
+  karyakartas      KaryakartaAccess[]
+
+  @@unique([localBodyId, prabhagNo, wardNo, phone])
+  @@index([phone])
+  @@index([localBodyId, prabhagNo, wardNo])
+  @@index([partyId])
+  @@map("candidate_access")
+}
+
+// ─── Karyakarta Access (workers bound to a specific candidate) ───
+model KaryakartaAccess {
+  id                Int              @id @default(autoincrement())
+  candidateAccessId Int              @map("candidate_access_id")
+  phone             String           @db.VarChar(10)
+  name              String?          @db.VarChar(255)
+  isActive          Boolean          @default(true) @map("is_active")
+  profileImageUrl   String?          @map("profile_image_url") @db.Text
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  candidate         CandidateAccess  @relation(fields: [candidateAccessId], references: [id], onDelete: Cascade)
+
+  @@unique([candidateAccessId, phone])
+  @@index([candidateAccessId])
+  @@index([phone])
+  @@map("karyakarta_access")
+}
+
+// ─── Registration Requests (candidate access approval queue) ───
+model RegistrationRequest {
+  id            Int                       @id @default(autoincrement())
+  phone         String                    @db.VarChar(10)
+  firstName     String?                   @map("first_name") @db.VarChar(255)
+  lastName      String?                   @map("last_name") @db.VarChar(255)
+  role          String?                   @db.VarChar(20)
+  localBodyId   Int                       @map("local_body_id")
+  zpPsSubType   String?                   @map("zp_ps_sub_type") @db.VarChar(2)
+  divisionId    Int?                      @map("division_id")
+  divisionName  String?                   @map("division_name") @db.VarChar(255)
+  collegeId     Int?                      @map("college_id")
+  collegeName   String?                   @map("college_name") @db.VarChar(255)
+  prabhagNo     String?                   @map("prabhag_no") @db.VarChar(255)
+  wardNo        String?                   @map("ward_no") @db.VarChar(255)
+  status        RegistrationRequestStatus @default(pending)
+  reviewedAt    DateTime?                 @map("reviewed_at")
+  createdAt     DateTime                  @default(now()) @map("created_at")
+  updatedAt     DateTime                  @updatedAt @map("updated_at")
+
+  localBody     LocalBody                 @relation(fields: [localBodyId], references: [id], onDelete: Cascade)
+
+  @@index([phone])
+  @@index([status])
+  @@index([localBodyId])
+  @@map("registration_requests")
+}
+
+// ─── Voter ↔ Party Color Tag (urban voters) ───
+model VoterPartyTag {
+  id        Int      @id @default(autoincrement())
+  partyId   Int      @map("party_id")
+  voterId   Int      @map("voter_id")
+  color     ColorTag @default(N)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  party     Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  voter     Voter    @relation(fields: [voterId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, voterId])
+  @@index([partyId, voterId])
+  @@index([voterId])
+  @@map("voter_party_tags")
+}
+
+// ─── ZpPsVoter ↔ Party Color Tag (rural voters) ───
+model ZpPsVoterPartyTag {
+  id           Int      @id @default(autoincrement())
+  partyId      Int      @map("party_id")
+  zpPsVoterId  Int      @map("zp_ps_voter_id")
+  color        ColorTag @default(N)
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  party        Party     @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  zpPsVoter    ZpPsVoter @relation(fields: [zpPsVoterId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, zpPsVoterId])
+  @@index([partyId, zpPsVoterId])
+  @@index([zpPsVoterId])
+  @@map("zp_ps_voter_party_tags")
+}
+
+// ─── Caste (party-specific voter categories) ───
+model Caste {
+  id        Int      @id @default(autoincrement())
+  partyId   Int      @map("party_id")
+  name      String   @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  party              Party              @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  voterCastes        VoterPartyCaste[]
+  zpPsVoterCastes    ZpPsVoterPartyCaste[]
+
+  @@unique([partyId, name])
+  @@index([partyId])
+  @@map("castes")
+}
+
+// ─── Voter ↔ Party Caste (urban) ───
+model VoterPartyCaste {
+  id       Int @id @default(autoincrement())
+  partyId  Int @map("party_id")
+  voterId  Int @map("voter_id")
+  casteId  Int @map("caste_id")
+
+  party  Party  @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  voter  Voter  @relation(fields: [voterId], references: [id], onDelete: Cascade)
+  caste  Caste  @relation(fields: [casteId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, voterId])
+  @@index([partyId, voterId])
+  @@index([casteId])
+  @@map("voter_party_castes")
+}
+
+// ─── ZpPsVoter ↔ Party Caste (rural) ───
+model ZpPsVoterPartyCaste {
+  id           Int @id @default(autoincrement())
+  partyId      Int @map("party_id")
+  zpPsVoterId  Int @map("zp_ps_voter_id")
+  casteId      Int @map("caste_id")
+
+  party      Party      @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  zpPsVoter  ZpPsVoter  @relation(fields: [zpPsVoterId], references: [id], onDelete: Cascade)
+  caste      Caste      @relation(fields: [casteId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, zpPsVoterId])
+  @@index([partyId, zpPsVoterId])
+  @@index([casteId])
+  @@map("zp_ps_voter_party_castes")
+}
+
+// ─── Contact Uploads (VCF files from mobile users) ───
+model ContactUpload {
+  id           Int      @id @default(autoincrement())
+  phone        String   @unique @db.VarChar(10)
+  vcfUrl       String   @map("vcf_url") @db.Text
+  contactCount Int      @default(0) @map("contact_count")
+  uploadedAt   DateTime @default(now()) @map("uploaded_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("contact_uploads")
+}
+
+// ─── Voter ↔ Party Mobile (urban voters) ───
+model VoterPartyMobile {
+  id        Int      @id @default(autoincrement())
+  partyId   Int      @map("party_id")
+  voterId   Int      @map("voter_id")
+  mobileNo  String   @map("mobile_no") @db.VarChar(15)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  party     Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  voter     Voter    @relation(fields: [voterId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, voterId])
+  @@index([partyId, voterId])
+  @@index([voterId])
+  @@map("voter_party_mobiles")
+}
+
+// ─── ZpPsVoter ↔ Party Mobile (rural voters) ───
+model ZpPsVoterPartyMobile {
+  id           Int       @id @default(autoincrement())
+  partyId      Int       @map("party_id")
+  zpPsVoterId  Int       @map("zp_ps_voter_id")
+  mobileNo     String    @map("mobile_no") @db.VarChar(15)
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  party        Party     @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  zpPsVoter    ZpPsVoter @relation(fields: [zpPsVoterId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, zpPsVoterId])
+  @@index([partyId, zpPsVoterId])
+  @@index([zpPsVoterId])
+  @@map("zp_ps_voter_party_mobiles")
+}
+
+// ─── Voter ↔ Party Dollar Assignment (urban voters) ───
+model VoterPartyDollar {
+  id         Int      @id @default(autoincrement())
+  partyId    Int      @map("party_id")
+  voterId    Int      @map("voter_id")
+  isAssigned Boolean  @default(true) @map("is_assigned")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  party      Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  voter      Voter    @relation(fields: [voterId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, voterId])
+  @@index([partyId, voterId])
+  @@index([voterId])
+  @@map("voter_party_dollars")
+}
+
+// ─── ZpPsVoter ↔ Party Dollar Assignment (rural voters) ───
+model ZpPsVoterPartyDollar {
+  id           Int      @id @default(autoincrement())
+  partyId      Int      @map("party_id")
+  zpPsVoterId  Int      @map("zp_ps_voter_id")
+  isAssigned   Boolean  @default(true) @map("is_assigned")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  party        Party        @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  zpPsVoter    ZpPsVoter    @relation(fields: [zpPsVoterId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, zpPsVoterId])
+  @@index([partyId, zpPsVoterId])
+  @@index([zpPsVoterId])
+  @@map("zp_ps_voter_party_dollars")
+}

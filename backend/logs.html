@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Logs Monitor</title>
+    <style>
+        body { 
+            font-family: -apple-system, system-ui, sans-serif; 
+            background: #0f172a; 
+            color: #fff; 
+            padding: 2rem; 
+            max-width: 1200px; 
+            margin: 0 auto; 
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .card { 
+            background: #1e293b; 
+            padding: 1.5rem; 
+            border-radius: 8px; 
+            margin-bottom: 1rem; 
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); 
+        }
+        .log-container {
+            background: #000;
+            color: #0f0;
+            font-family: monospace;
+            padding: 1rem;
+            border-radius: 6px;
+            height: 70vh;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .controls {
+            margin-bottom: 1rem;
+        }
+        button, select {
+            background: #38bdf8;
+            color: #0f172a;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-right: 0.5rem;
+        }
+        button:hover { background: #0284c7; }
+        .auto-scroll-label {
+            font-size: 0.9rem;
+            color: #94a3b8;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>FastAPI Application Logs</h1>
+        <div class="controls">
+            <span class="auto-scroll-label">Lines: </span>
+            <select id="line-count" onchange="fetchLogs()">
+                <option value="100">100</option>
+                <option value="500">500</option>
+                <option value="1000" selected>1000</option>
+                <option value="5000">5000</option>
+            </select>
+            <label class="auto-scroll-label" style="margin-left: 1rem;">
+                <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+            </label>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="log-container" id="log-container">Loading logs...</div>
+    </div>
+
+    <script>
+        let intervalId = null;
+
+        async function fetchLogs() {
+            try {
+                const lines = document.getElementById('line-count').value;
+                const res = await fetch(`/api/logs?lines=${lines}`);
+                const data = await res.json();
+                
+                const container = document.getElementById('log-container');
+                container.textContent = data.logs.join('');
+                
+                if (document.getElementById('auto-scroll').checked) {
+                    container.scrollTop = container.scrollHeight;
+                }
+            } catch (err) {
+                console.error("Error fetching logs:", err);
+                document.getElementById('log-container').textContent = "Error fetching logs. Is the server running and api.log present?";
+            }
+        }
+        
+        // Refresh logs every 2 seconds
+        intervalId = setInterval(fetchLogs, 2000);
+        fetchLogs();
+    </script>
+</body>
+</html>

@@ -144,15 +144,31 @@ def parse_box_text(text: str, header_data: dict) -> dict:
 
     # Name
     name_match = re.search(r"मतदाराचे पूर्ण[:\s]*([^|]+)", text)
-    row_data["मतदाराचे पूर्ण"] = name_match.group(1).strip() if name_match else ""
+    if name_match:
+        n_str = name_match.group(1).strip()
+        n_str = re.split(r"(?:घर क्रमां?क|लिंग|वय|Photo)\s*:", n_str)[0].strip()
+        n_str = re.sub(r'^(?:नाव|पूर्ण\s*नाव)\s*[:\.\-]?\s*', '', n_str).strip()
+        row_data["मतदाराचे पूर्ण"] = n_str
+    else:
+        row_data["मतदाराचे पूर्ण"] = ""
 
     # House number
     house_match = re.search(r"घर क्रमां?क\s*[:\.\s]*([^|]+)", text)
-    row_data["घर क्रमांक"] = house_match.group(1).strip() if house_match else ""
+    if house_match:
+        h_str = house_match.group(1).strip()
+        h_str = re.split(r"(?:लिंग|वय|Photo)\s*:", h_str)[0].strip()
+        row_data["घर क्रमांक"] = h_str
+    else:
+        row_data["घर क्रमांक"] = ""
 
     # Gender
     gender_match = re.search(r"लिंग\s*:\s*([^|]+)", text)
-    row_data["लिंग"] = gender_match.group(1).strip() if gender_match else ""
+    if gender_match:
+        g_str = gender_match.group(1).strip()
+        g_str = re.split(r"(?:वय|Photo)\s*:", g_str)[0].strip()
+        row_data["लिंग"] = g_str
+    else:
+        row_data["लिंग"] = ""
 
     # Age
     age_match = re.search(r"वय\s*[:\s]*([\d०-९]+)", text)
@@ -231,6 +247,8 @@ def parse_raw_text(raw_lines: list[str]) -> list[dict]:
     """
     all_results = []
     current_header = {}
+    total_boxes = 0
+    boxes_with_voter_id = 0
 
     for line in raw_lines:
         line = line.strip()
@@ -244,6 +262,7 @@ def parse_raw_text(raw_lines: list[str]) -> list[dict]:
             current_header["raw_header"] = header_text
 
         elif line.startswith("BOX"):
+            total_boxes += 1
             # Extract the unique box id: `BOX {page_num}_{crop_idx}: ...`
             match = re.match(r"BOX\s+([0-9_]+):\s*(.*)", line)
             if match:
@@ -258,7 +277,13 @@ def parse_raw_text(raw_lines: list[str]) -> list[dict]:
             row["_box_id"] = box_id
             
             if row.get("voter_id", "").strip():
+                boxes_with_voter_id += 1
                 all_results.append(row)
+
+    logger.info(
+        "Parse summary: %d total BOX lines, %d had voter_id → %d records kept",
+        total_boxes, boxes_with_voter_id, len(all_results)
+    )
 
     if not all_results:
         return []
@@ -278,3 +303,4 @@ def parse_raw_text(raw_lines: list[str]) -> list[dict]:
 
     logger.info("Parsed %d voter records", len(all_results))
     return all_results
+
