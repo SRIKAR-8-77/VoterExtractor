@@ -26,9 +26,9 @@ DPI = 800
 
 import os
 # Setup hardware optimized batch sizes for Surya OCR from environment variables
-# Fallbacks match original native behavior without env vars
-os.environ["RECOGNITION_BATCH_SIZE"] = os.getenv("OCR_BATCH_SIZE", "4")
-os.environ["DETECTOR_BATCH_SIZE"] = os.getenv("OCR_BATCH_SIZE", "4")
+# Keeping batch size strictly to 2 to prevent tensor out-of-bounds/memory errors
+os.environ["RECOGNITION_BATCH_SIZE"] = os.getenv("OCR_BATCH_SIZE", "2")
+os.environ["DETECTOR_BATCH_SIZE"] = os.getenv("OCR_BATCH_SIZE", "2")
 # Note: torch dataloader workers are usually configured via batch processing wrappers or PyTorch natively, 
 # but setting this allows surya / torch to adjust if applicable.
 os.environ["TORCH_DATALOADER_WORKERS"] = os.getenv("TORCH_DATALOADER_WORKERS", "0")
@@ -271,9 +271,8 @@ def extract_pdf(
             box_count = 0
             if valid_crops:
                 # Process in mini-batches to prevent Surya OCR internal tensor bugs
-                # (e.g. "index 233 is out of bounds for dimension 0 with size 233")
-                # while keeping the H100 utilized efficiently.
-                BATCH_SIZE = 10
+                # Keeping the request size explicitly to 2
+                BATCH_SIZE = int(os.environ.get("OCR_BATCH_SIZE", "2"))
                 
                 for batch_start in range(0, len(valid_crops), BATCH_SIZE):
                     batch_crops = valid_crops[batch_start:batch_start + BATCH_SIZE]

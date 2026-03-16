@@ -48,10 +48,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Job Store ────────────────────────────────────────────────
+# ── Job Queue ────────────────────────────────────────────────
 # In-memory store for job tracking. For production, use Redis/DB.
 
 jobs: dict[str, dict] = {}
+job_queue = asyncio.Queue()
+
+# Configure how many PDFs to process entirely in parallel. The rest wait in queue.
+# Use PDF_PROCESSING_WORKERS from .env if present, otherwise fallback to MAX_CONCURRENT_JOBS or 4.
+MAX_CONCURRENT_JOBS = int(os.getenv("PDF_PROCESSING_WORKERS", os.getenv("MAX_CONCURRENT_JOBS", "4")))
+
+async def job_worker():
+    """Background worker that processes one job at a time from the queue."""
+    while True:
+        job_data = await job_queue.get()
+        if job_data is None:
+            break
+        job_id = job_data["job_id"]
+        try:
+            await _process_job(
+                job_id,
+                job_data["pdf_paths"],
+                max_pages=job_data["max_pages"],
+                r2_config=job_data["r2_config"],
+                db_params=job_data["db_params"]
+            )
+        except Exception as e:
+            logger.exception("Error processing job %s", job_id)
+            if job_id in jobs:
+                jobs[job_id]["status"] = "failed"
+                jobs[job_id]["error"] = str(e)
+                jobs[job_id]["progress"] = 100
+        finally:
+            job_queue.task_done()
+
+@app.on_event("startup")
+async def startup_event():
+    # Start multiple background worker processes for parallel execution
+    for _ in range(MAX_CONCURRENT_JOBS):
+        asyncio.create_task(job_worker())
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "pdf_processor" / "uploads"
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "pdf_processor" / "outputs"
@@ -280,16 +315,14 @@ async def process_pdfs(
         "created_at": datetime.utcnow().isoformat(),
     }
 
-    # Launch background processing
-    asyncio.create_task(
-        _process_job(
-            job_id, 
-            saved_paths, 
-            max_pages=max_pages, 
-            r2_config=r2_config,
-            db_params=jobs[job_id]["db_params"]
-        )
-    )
+    # Enqueue background processing
+    job_queue.put_nowait({
+        "job_id": job_id,
+        "pdf_paths": saved_paths,
+        "max_pages": max_pages,
+        "r2_config": r2_config,
+        "db_params": jobs[job_id]["db_params"]
+    })
 
     return {"job_id": job_id, "files": [f.filename for f in files]}
 

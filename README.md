@@ -19,8 +19,8 @@ Running the deployment step-by-step is recommended to easily catch any installat
 From your local machine, use `rsync` to upload the project files (this includes your `.env` configuration file). Change the port and IP to match your server:
 
 ```bash
-rsync -avz --exclude '.git' --exclude 'output' --exclude 'uploads' --exclude '__pycache__' --exclude 'server.log' -e 'ssh -p 46056' ./ root@76.68.174.145:/root/VoterExtractor/
-ssh -p 46056 root@76.68.174.145 -L 8080:localhost:8080
+rsync -avz --exclude '.git' --exclude 'output' --exclude 'uploads' --exclude '__pycache__' --exclude 'server.log' -e 'ssh -p 9907' ./ root@190.231.99.173:/root/VoterExtractor/
+ssh -p 9907 root@190.231.99.173 -L 8080:localhost:8080
 ```
 
 ### 2. Enter the Server
@@ -49,7 +49,8 @@ First, kill any existing instance. Then, start it in the background using `nohup
 pkill -f 'uvicorn backend.main' || true
 
 # Start new server in the background
-nohup env CUDA_LAUNCH_BLOCKING=1 python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 6969 < /dev/null > api.log 2>&1 &
+nohup python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 80 < /dev/null > api.log 2>&1 &
+
 ```
 *Tip: You can view the live server logs by running `tail -f api.log`*
 
