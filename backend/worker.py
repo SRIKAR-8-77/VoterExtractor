@@ -10,6 +10,15 @@ import queue
 
 from backend import state
 
+
+def _get_pdf_processing_workers() -> int:
+    """Read ProcessPool worker count from environment with safe fallback."""
+    try:
+        workers = int(os.environ.get("PDF_PROCESSING_WORKERS", "2"))
+        return max(1, workers)
+    except (TypeError, ValueError):
+        return 2
+
 # -- Top Level isolated function (Runs in separate OS process) --
 def process_pdf_isolated(task, progress_queue):
     """
@@ -71,14 +80,15 @@ def process_pdf_isolated(task, progress_queue):
         
         # 3. Build Excel
         os.makedirs("output", exist_ok=True)
-        output_filename = f"output_{job_id}_{filename}.xlsx"
+        pdf_stem = os.path.splitext(os.path.basename(filename))[0]
+        output_filename = f"output_{job_id}_{pdf_stem}.xlsx"
         output_path = os.path.join("output", output_filename)
         build_excel(results, output_path)
         
         emit("info", f"[{filename}] Stage 4: Bundling images into ZIP...", stage="Zipping voter images...")
         
         # 4. Build ZIP file of crop images
-        zip_filename = f"output_{job_id}_{filename}.zip"
+        zip_filename = f"output_{job_id}_{pdf_stem}.zip"
         zip_path = os.path.join("output", zip_filename)
         crop_dir = os.path.join("output", f"{job_id}_crops")
         
@@ -133,8 +143,8 @@ def background_worker_loop():
     state.master_mp_queue = manager.Queue()
     
     import concurrent.futures
-    # Allow exactly 2 PDFs simultaneously (3 overflows 24GB VRAM with Surya OCR models)
-    pool = concurrent.futures.ProcessPoolExecutor(max_workers=2, mp_context=ctx)
+    max_workers = _get_pdf_processing_workers()
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx)
 
     def drain_queue():
         """Helper to instantly process all messages waiting from child processes."""
@@ -192,7 +202,8 @@ def background_worker_loop():
                 
             # Abandon running tasks and recreate the pool
             pool.shutdown(wait=False, cancel_futures=True)
-            pool = concurrent.futures.ProcessPoolExecutor(max_workers=2, mp_context=ctx)
+            max_workers = _get_pdf_processing_workers()
+            pool = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx)
             
             # Wipe local dict
             state.active_jobs = {}

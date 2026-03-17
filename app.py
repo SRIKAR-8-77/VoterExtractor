@@ -4,8 +4,11 @@ import uuid
 import threading
 import streamlit as st
 import pandas as pd
+from dotenv import load_dotenv
 
 from backend import state, worker
+
+load_dotenv()
 
 # Configure Streamlit page
 st.set_page_config(page_title="VoterXcel - PDF to Excel", page_icon="📊", layout="wide")
@@ -13,6 +16,20 @@ st.set_page_config(page_title="VoterXcel - PDF to Excel", page_icon="📊", layo
 # Ensure directories exist
 os.makedirs("uploads", exist_ok=True)
 os.makedirs("output", exist_ok=True)
+
+
+def _download_name_from_output_file(output_file: str, extension: str) -> str:
+    """Map internal output filename to user-facing download name."""
+    base_name = output_file
+    if output_file.startswith("output_"):
+        parts = output_file.split("_", 2)
+        if len(parts) == 3:
+            base_name = parts[2]
+
+    stem, _ = os.path.splitext(base_name)
+    if stem.lower().endswith(".pdf"):
+        stem = stem[:-4]
+    return f"{stem}{extension}"
 
 # ─── Initialization ───────────────────────────────────────────────
 # Streamlit occasionally forgets global threads during heavy session state wipes.
@@ -25,6 +42,7 @@ if getattr(state, "worker_thread", None) is None or not state.worker_thread.is_a
 with st.sidebar:
     st.title("⚙️ Environment & Config")
     st.info(f"**CPU Threads (OMP):** {os.environ.get('OMP_NUM_THREADS', 'Not set')}")
+    st.info(f"**PDF Workers:** {os.environ.get('PDF_PROCESSING_WORKERS', 'Not set')}")
     st.info(f"**OCR Batch Size:** {os.environ.get('OCR_BATCH_SIZE', 'Not set')}")
     st.info(f"**Worker Thread Active:** {'✅ Yes' if state.worker_thread.is_alive() else '❌ No'}")
     
@@ -153,6 +171,8 @@ with tabs[2]:
             excel_path = os.path.join("output", f)
             zip_f = f.replace(".xlsx", ".zip")
             zip_path = os.path.join("output", zip_f)
+            download_excel_name = _download_name_from_output_file(f, ".xlsx")
+            download_zip_name = _download_name_from_output_file(f, ".zip")
             
             col1, col2, col3, col4 = st.columns([5, 2, 2, 1])
             
@@ -166,7 +186,7 @@ with tabs[2]:
                     st.download_button(
                         label="⬇️ Excel",
                         data=file_data,
-                        file_name=f,
+                        file_name=download_excel_name,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"dl_ex_{f}"
                     )
@@ -177,7 +197,7 @@ with tabs[2]:
                         st.download_button(
                             label="⬇️ Images (ZIP)",
                             data=zip_data,
-                            file_name=zip_f,
+                            file_name=download_zip_name,
                             mime="application/zip",
                             key=f"dl_zip_{f}"
                         )

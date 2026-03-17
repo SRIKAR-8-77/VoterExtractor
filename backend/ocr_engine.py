@@ -8,6 +8,7 @@ Core logic mirrors the original notebook: ocr_final (1).ipynb
 """
 
 import re
+import os
 import time
 import threading
 import logging
@@ -50,6 +51,15 @@ def load_models():
     )
     logger.info("Models loaded in %.1fs", time.time() - t)
     return _rec_predictor, _det_predictor
+
+
+def _get_ocr_batch_size() -> int:
+    """Read OCR batch size from environment with a safe fallback."""
+    try:
+        size = int(os.environ.get("OCR_BATCH_SIZE", "8"))
+        return max(1, size)
+    except (TypeError, ValueError):
+        return 8
 
 
 # ── Grid Detection ───────────────────────────────────────────
@@ -161,7 +171,6 @@ def extract_pdf(
     Returns:
         List of raw text lines (same format as the _RAW.txt files from the notebook).
     """
-    import os
     rec_predictor, det_predictor = load_models()
     
     crop_dir = os.path.join("output", f"{job_id}_crops")
@@ -230,18 +239,20 @@ def extract_pdf(
             box_count = 0
             if valid_crops:
                 try:
-                    preds = rec_predictor(valid_crops, det_predictor=det_predictor)
-                    
-                    for crop_idx, pred in zip(valid_indices, preds):
-                        crop_img = valid_crops[valid_indices.index(crop_idx)]
-                        
-                        # Save the crop image for the zip bundle later
-                        crop_filename = f"{page_num}_{crop_idx}.jpg"
-                        crop_img.save(os.path.join(crop_dir, crop_filename), "JPEG")
-                        
-                        raw_text = " | ".join([ln.text for ln in pred.text_lines])
-                        output_lines.append(f"BOX {page_num}_{crop_idx}: {raw_text}")
-                        
+                    ocr_batch_size = _get_ocr_batch_size()
+                    for start in range(0, len(valid_crops), ocr_batch_size):
+                        batch_crops = valid_crops[start:start + ocr_batch_size]
+                        batch_indices = valid_indices[start:start + ocr_batch_size]
+                        preds = rec_predictor(batch_crops, det_predictor=det_predictor)
+
+                        for crop_idx, crop_img, pred in zip(batch_indices, batch_crops, preds):
+                            # Save the crop image for the zip bundle later
+                            crop_filename = f"{page_num}_{crop_idx}.jpg"
+                            crop_img.save(os.path.join(crop_dir, crop_filename), "JPEG")
+
+                            raw_text = " | ".join([ln.text for ln in pred.text_lines])
+                            output_lines.append(f"BOX {page_num}_{crop_idx}: {raw_text}")
+
                     box_count = len(valid_crops)
                 except Exception as e:
                     logger.warning("Error processing batch on page %d: %s", page_num + 1, e)
