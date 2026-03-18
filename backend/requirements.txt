@@ -11,3 +11,5 @@ python-dotenv>=1.0.1
 torch
 torchvision
 torchaudio
+patool
+gdown

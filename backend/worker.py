@@ -29,6 +29,8 @@ def process_pdf_isolated(task, progress_queue):
     job_id = task["job_id"]
     filename = task["filename"]
     pdf_path = task["pdf_path"]
+    batch_id = task.get("batch_id")
+    rel_dir = task.get("rel_dir", "")
     
     # We must import these locally so the child process loads the ML models into its own isolated VRAM
     from backend.ocr_engine import extract_pdf
@@ -39,6 +41,7 @@ def process_pdf_isolated(task, progress_queue):
         progress_queue.put({
             "job_id": job_id,
             "filename": filename,
+            "batch_id": batch_id,
             "level": level,
             "msg": msg,
             "progress": progress,
@@ -79,17 +82,27 @@ def process_pdf_isolated(task, progress_queue):
         emit("info", f"[{filename}] Stage 3: Formatting {len(results)} records into Excel...", stage="Building Excel file...")
         
         # 3. Build Excel
-        os.makedirs("output", exist_ok=True)
         pdf_stem = os.path.splitext(os.path.basename(filename))[0]
-        output_filename = f"output_{job_id}_{pdf_stem}.xlsx"
-        output_path = os.path.join("output", output_filename)
+        
+        if batch_id:
+            out_base = os.path.join("output", batch_id)
+            out_dir = os.path.join(out_base, rel_dir) if rel_dir else out_base
+            os.makedirs(out_dir, exist_ok=True)
+            output_filename = f"{pdf_stem}.xlsx"
+            zip_filename = f"{pdf_stem}.zip"
+        else:
+            out_dir = "output"
+            os.makedirs(out_dir, exist_ok=True)
+            output_filename = f"output_{job_id}_{pdf_stem}.xlsx"
+            zip_filename = f"output_{job_id}_{pdf_stem}.zip"
+            
+        output_path = os.path.join(out_dir, output_filename)
         build_excel(results, output_path)
         
         emit("info", f"[{filename}] Stage 4: Bundling images into ZIP...", stage="Zipping voter images...")
         
         # 4. Build ZIP file of crop images
-        zip_filename = f"output_{job_id}_{pdf_stem}.zip"
-        zip_path = os.path.join("output", zip_filename)
+        zip_path = os.path.join(out_dir, zip_filename)
         crop_dir = os.path.join("output", f"{job_id}_crops")
         
         with zipfile.ZipFile(zip_path, 'w') as zf:
@@ -119,7 +132,7 @@ def process_pdf_isolated(task, progress_queue):
                 pass
         
         # Let Streamlit know this worker finished
-        progress_queue.put({"job_id": job_id, "done": True})
+        progress_queue.put({"job_id": job_id, "done": True, "batch_id": batch_id})
 
 
 # -- Main Thread Loop (Runs in Streamlit App background to coordinate the OS processes) --
@@ -159,6 +172,12 @@ def background_worker_loop():
                     # Process completed natively
                     if job_id in state.active_jobs:
                         del state.active_jobs[job_id]
+                    
+                    # Update batch progress if applicable
+                    b_id = msg.get("batch_id")
+                    if b_id and getattr(state, "batches", None) and b_id in state.batches:
+                        state.batches[b_id]["completed"] += 1
+                        
                     continue
                 
                 # Update UI state dictionary
@@ -195,10 +214,8 @@ def background_worker_loop():
         if state.cancel_all_requested:
             logger.warning("Global cancellation triggered! Shutting down pool and purging queue...")
             
-            # Instantly purge the queue
-            while not state.task_queue.empty():
-                try: state.task_queue.get_nowait()
-                except: pass
+            # Instantly purge pending queue and reset shared pending counter
+            state.clear_pending_tasks()
                 
             # Abandon running tasks and recreate the pool
             pool.shutdown(wait=False, cancel_futures=True)
@@ -215,7 +232,7 @@ def background_worker_loop():
         
         try:
             # Check for new PDFs in Streamlit's task queue without blocking forever
-            task = state.task_queue.get(timeout=0.5)
+            task = state.dequeue_task(timeout=0.5)
             
             # Submitting to pool doesn't block; it immediately queues it into the 3-OS-process pool
             try:
@@ -239,7 +256,7 @@ def background_worker_loop():
             except Exception as pool_err:
                 state.logs.append(f"{time.strftime('%H:%M:%S')} [ERROR] - ProcessPool Dead: {pool_err}")
                 # Try to recycle task
-                state.task_queue.put(task)
+                state.enqueue_task(task)
             
         except queue.Empty:
             pass

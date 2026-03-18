@@ -2,6 +2,19 @@
 
 A web application that extracts structured voter data from PDF voter rolls using OCR (Surya-OCR) and generates formatted Excel files. Upload one or more PDFs, track processing progress in real-time, and download the results.
 
+rsync -avz --exclude '.git' --exclude 'output' --exclude 'uploads' --exclude '__pycache__' --exclude 'server.log' -e 'ssh -p 27351' ./ root@74.48.140.178:/root/VoterExtractor/
+
+ssh -p 27351 root@74.48.140.178 -L 8080:localhost:8080
+
+apt-get update && apt-get install -y file
+apt get install unrar
+
+cd /root/VoterExtractor
+# Install heavy ML models and basic libraries
+pip install -r backend/requirements.txt
+# Ensure server running utilities are present
+pip install fastapi uvicorn python-dotenv boto3 psutil streamlit
+
 ## Features
 
 - 🔍 **OCR-powered extraction** — Uses Surya-OCR with GPU acceleration for high-accuracy Marathi text recognition
