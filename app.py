@@ -158,11 +158,13 @@ def _process_local_file_to_queue(file_path: str, file_name: str) -> None:
         with open(os.path.join(out_batch_dir, ".batch_name"), "w") as f:
             f.write(file_name)
             
-        state.batches[batch_id] = {
-            "name": file_name,
-            "total": pdf_count,
-            "completed": 0
-        }
+        import json
+        with open(os.path.join(out_batch_dir, ".batch_info.json"), "w") as f:
+            json.dump({
+                "name": file_name,
+                "total": pdf_count,
+                "completed": 0
+            }, f)
             
         st.success(f"Added {pdf_count} PDF(s) from {file_name} to the backend queue!")
     else:
@@ -266,11 +268,13 @@ with tabs[0]:
                     with open(os.path.join(out_batch_dir, ".batch_name"), "w") as f:
                         f.write(uf.name)
                         
-                    state.batches[batch_id] = {
-                        "name": uf.name,
-                        "total": pdf_count,
-                        "completed": 0
-                    }
+                    import json
+                    with open(os.path.join(out_batch_dir, ".batch_info.json"), "w") as f:
+                        json.dump({
+                            "name": uf.name,
+                            "total": pdf_count,
+                            "completed": 0
+                        }, f)
                         
                     st.success(f"Added {pdf_count} PDF(s) from {uf.name} to the backend queue!")
                 else:
@@ -518,25 +522,31 @@ with tabs[2]:
             active_batches = []
             completed_batches = []
             
+            import json
+            
             for b in output_batches:
-                if hasattr(state, "batches") and b in state.batches and state.batches[b]["completed"] < state.batches[b]["total"]:
-                    active_batches.append(b)
+                batch_dir = os.path.join("output", b)
+                info_path = os.path.join(batch_dir, ".batch_info.json")
+                if os.path.exists(info_path):
+                    with open(info_path, "r") as f:
+                        try:
+                            b_info = json.load(f)
+                            if b_info.get("completed", 0) < b_info.get("total", 1):
+                                active_batches.append((b, b_info))
+                            else:
+                                completed_batches.append(b)
+                        except:
+                            completed_batches.append(b)
                 else:
+                    # Legacy support or missing file
                     completed_batches.append(b)
                     
             if active_batches:
                 st.subheader("⚙️ Processing Archive Batches...")
-                for b in active_batches:
-                    batch_dir = os.path.join("output", b)
-                    try:
-                        with open(os.path.join(batch_dir, ".batch_name"), "r") as f:
-                            b_name = f.read().strip()
-                    except:
-                        b_name = b
-                        
-                    b_info = state.batches[b]
-                    completedCount = b_info["completed"]
-                    totalCount = b_info["total"]
+                for b, b_info in active_batches:
+                    b_name = b_info.get("name", b)
+                    completedCount = b_info.get("completed", 0)
+                    totalCount = b_info.get("total", 1)
                     pct = completedCount / max(1, totalCount)
                     
                     st.write(f"🗂️ **{b_name}** - {completedCount} / {totalCount} PDFs Completed...")

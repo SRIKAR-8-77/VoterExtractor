@@ -252,6 +252,11 @@ def extract_pdf(
 
                             raw_text = " | ".join([ln.text for ln in pred.text_lines])
                             output_lines.append(f"BOX {page_num}_{crop_idx}: {raw_text}")
+                            
+                        # Free up CUDA memory immediately after processing each batch
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
                     box_count = len(valid_crops)
                 except Exception as e:

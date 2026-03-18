@@ -26,6 +26,22 @@ def process_pdf_isolated(task, progress_queue):
     It has its own memory space and therefore its own initialized PyTorch/CUDA context.
     It communicates with the Streamlit main process ONLY by pushing messages to the `progress_queue`.
     """
+    # Enforce strict thread limits to prevent OpenMP/PyTorch OutOfMemory from thread bloating
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    
+    try:
+        import torch
+        torch.set_num_threads(1)
+        if torch.cuda.is_available():
+            # Release any fragmented cache upon start
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
     job_id = task["job_id"]
     filename = task["filename"]
     pdf_path = task["pdf_path"]
@@ -175,8 +191,19 @@ def background_worker_loop():
                     
                     # Update batch progress if applicable
                     b_id = msg.get("batch_id")
-                    if b_id and getattr(state, "batches", None) and b_id in state.batches:
-                        state.batches[b_id]["completed"] += 1
+                    if b_id:
+                        import json
+                        batch_dir = os.path.join("output", b_id)
+                        info_path = os.path.join(batch_dir, ".batch_info.json")
+                        if os.path.exists(info_path):
+                            try:
+                                with open(info_path, "r") as f:
+                                    b_info = json.load(f)
+                                b_info["completed"] = b_info.get("completed", 0) + 1
+                                with open(info_path, "w") as f:
+                                    json.dump(b_info, f)
+                            except:
+                                pass
                         
                     continue
                 
