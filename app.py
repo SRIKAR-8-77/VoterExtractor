@@ -191,6 +191,7 @@ if getattr(state, "worker_thread", None) is None or not state.worker_thread.is_a
 # ─── Sidebar: Config & Environment ──────────────────────────────────
 with st.sidebar:
     st.title("⚙️ Environment & Config")
+    st.info(f"**Compute Target:** GPU with System RAM Offloading (Unified Memory)")
     st.info(f"**CPU Threads (OMP):** {os.environ.get('OMP_NUM_THREADS', 'Not set')}")
     st.info(f"**PDF Workers:** {os.environ.get('PDF_PROCESSING_WORKERS', 'Not set')}")
     st.info(f"**OCR Batch Size:** {os.environ.get('OCR_BATCH_SIZE', 'Not set')}")

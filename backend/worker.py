@@ -33,6 +33,9 @@ def process_pdf_isolated(task, progress_queue):
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
     
+    # Enable PyTorch Unified Memory (Offload to System RAM when GPU VRAM is full)
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    
     try:
         import torch
         torch.set_num_threads(1)
